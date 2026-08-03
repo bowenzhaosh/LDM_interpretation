@@ -17,9 +17,11 @@ from pfn_dag_verify.phase1_ordering import (
     _calibration_candidate_passes,
     _sha256_json,
     _validate_calibration_config,
+    absolute_log_probability_change,
     generate_evaluation_stream,
     quadrature_grid,
     load_fleet_module,
+    production_qualification_protocol,
     run_calibration,
     sample_sigmas_exact,
     validate_probability,
@@ -32,6 +34,14 @@ FLEET_PATH = ROOT / "artifacts" / "phase1" / "d4_generator.py"
 
 def _fleet():
     return load_fleet_module(FLEET_PATH)
+
+
+def test_observed_bin_log_probability_change_fails_closed_on_zero():
+    candidate = np.array([0.0, 1.0], dtype=np.float64)
+    reference = np.array([0.0, 1.0], dtype=np.float64)
+    with pytest.raises(RuntimeError, match="finite and positive"):
+        absolute_log_probability_change(candidate, reference, 0)
+    assert absolute_log_probability_change(candidate, reference, 1) == 0.0
 
 
 def test_vectorized_sigma_sampler_is_bit_identical_to_frozen_sampler():
@@ -185,6 +195,17 @@ def test_registered_config_and_runtime_inventory_match_the_frozen_protocol():
     )
     expected = inventory.pop("runtime_binary_fingerprint")
     assert _sha256_json(inventory) == expected
+    for bank_index in range(3):
+        qualification = json.loads(
+            (
+                ROOT
+                / "config"
+                / f"phase1_ordering_qualification_bank{bank_index}.json"
+            ).read_text()
+        )
+        assert qualification == production_qualification_protocol(bank_index)
+        assert qualification["calibration_contexts_per_prior"] == 160
+        assert qualification["qualification_zero_exceedance"]["families"] == 48
 
 
 def test_attempt_lease_allows_only_one_live_writer(tmp_path):

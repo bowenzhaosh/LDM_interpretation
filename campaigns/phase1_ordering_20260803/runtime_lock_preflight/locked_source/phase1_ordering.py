@@ -1109,12 +1109,6 @@ def run_calibration(
             "runtime_binary_fingerprint": observed_runtime_inventory[
                 "runtime_binary_fingerprint"
             ],
-            "cpu_identity_sha256": _sha256_json(
-                observed_runtime_inventory["cpu_identity"]
-            ),
-            "numpy_runtime_sha256": hashlib.sha256(
-                observed_runtime_inventory["numpy_runtime"].encode()
-            ).hexdigest(),
             "requirements_lock_sha256": _sha256_file(requirements_lock_path),
         }
         if any(

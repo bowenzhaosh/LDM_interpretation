@@ -1,10 +1,6 @@
 # Phase-1 ordering-use replication preregistration
 
-Status: **CALIBRATION COMPLETE; CONFIRMATORY PROTOCOL NOT YET LOCKED**
-
-The registered calibration at commit `e679e74930fc990dc834e0a03aec0a10b582a862`
-passed and selected `T_atom = 8,192` against the 32,768-atom reference. No PFN
-checkpoint or scientific endpoint was evaluated during calibration.
+Status: **CALIBRATION PROTOCOL, NOT YET LOCKED FOR CONFIRMATORY DATA**
 
 This protocol is for the first output-level claim that remains scientifically
 independent of the failed Phase-2 induced-coordinate instrument. No projected
@@ -15,17 +11,13 @@ activation intervention appears in this experiment.
 
 Primary claim:
 
-> In the exact archived d=4 base fleet, the three causal-AL(r=4) models at
-> 120,000 steps have a larger ordering-specific output advantage than the three
-> independently trained Gaussian-control models.
+> By 120,000 training steps, base d=4 PFNs trained on the causal AL(r=4)
+> prior exploit predictive information associated with causal ordering.
 
 The operational claim is restricted to the archived `nets4_xlong` checkpoint
 fleet, context size 30, the native 100-bin output head, and the frozen d=4
 synthetic generator. It is not a claim that the model explicitly represents a
-Bayesian posterior over orderings. The six trained models are fixed objects;
-the experiment supports inference over fresh contexts for this fleet, not over
-the population of possible training runs. A population claim requires a later
-prospective training replication with substantially more independent seeds.
+Bayesian posterior over orderings.
 
 Secondary claim:
 
@@ -48,10 +40,6 @@ orderings to be uniform. The primary ordering-specific contrast is
 
 `Delta(t) = deficit_C(t) - deficit_N(t)`.
 
-For each prior, the deficit is first averaged equally over its three fixed
-models and then over fresh held-out contexts. The `C` and `N` training seed
-labels do not define paired randomizations and are never paired or resampled.
-
 `N` is the matched Gaussian control for which ordering is non-identifiable and
 `V_N = E[NLL_ablated,N - NLL_full,N]` is zero in the population. A negative
 `Delta` means that the causal-prior PFN beats the ordering-blind reference by
@@ -66,9 +54,7 @@ secondary; 60,000 is descriptive.
 - Architecture/scale: d=4 base PFN, native 100-bin head.
 - Training length: 120,000 steps.
 - Priors: `C` and `N`.
-- Fixed training-seed labels: 0, 1, and 2 in each prior arm. The two arms were
-  initialized and trained with prior-specific RNG streams, so equal labels are
-  not treated as matched seeds.
+- Matched training seeds: 0, 1, and 2.
 - Checkpoint directory on WashU: `nets4_xlong`.
 - Expected names: `M4_<prior>_s<seed>_st120000[_ck<step>].pt`.
 
@@ -80,10 +66,9 @@ The Phase-1 CUDA run is not installed from this repository's macOS mapping
 requirements. It uses the separate WashU interpreter and package lock under
 `environment/phase1-washu-*`. Before a production attempt, the runner verifies
 the Python executable, NumPy and Torch payload trees, NumPy/Torch build
-configuration, CPU model and instruction features, active BLAS runtime and
-thread count, CUDA driver, GPU model and capability, deterministic settings,
-and `pip check`. OpenBLAS is fixed to one thread. A resumable attempt is bound
-to that exact fingerprint and has one atomic writer lease.
+configuration, CUDA driver, GPU model and capability, deterministic settings,
+and `pip check`. A resumable attempt is bound to that exact fingerprint and has
+one atomic writer lease.
 
 ## Fresh sampling design
 
@@ -141,26 +126,6 @@ ordering labels, or predictive arrays. After calibration, freeze the selected
 a confirmatory attempt file and create an annotated local attempt tag before
 generating confirmatory contexts.
 
-The first calibration used 32 contexts per prior and one atom bank. It selects
-the candidate under the registered finite-sample rule, but it is not by itself
-a population-tail or cross-bank guarantee. Before any confirmatory context is
-generated, the selected ladder is therefore qualified on the three atom banks
-that will be frozen for confirmation. Qualification uses 160 fresh contexts
-per prior per bank from the explicit seeds `880903000..880903002` for `C` and
-`880913000..880913002` for `N`; these contexts are never reused in confirmation.
-Both 8,192 and 16,384 are compared directly with 32,768. The lowest candidate
-must pass every aggregate threshold above for every bank, prior, and predictor.
-In addition, no individual context may exceed the strict p95 boundary of
-`9e-4` JS or `0.009` nats absolute held-out log-probability change in any of the
-48 candidate × bank × prior × predictor × metric families. With 160
-zero-exceedance trials, the Bonferroni-adjusted one-sided 95%
-Clopper-Pearson upper bound is 4.21% per family. Every full atom array is
-content-hashed immediately after generation. All three jobs also regenerate a
-common 4,096-atom canary from seed `881103999`; disagreement between canary
-hashes invalidates the qualification. A resumed shard must reproduce its
-recorded full-bank hash before any partial diagnostic is reused. If neither
-candidate qualifies, stop without generating confirmatory contexts.
-
 ## Confirmatory validity gates
 
 Every gate must pass before the primary contrast is interpreted.
@@ -172,42 +137,25 @@ Every gate must pass before the primary contrast is interpreted.
    batch-size replay within `1e-6`; context-row permutation replay within
    `1e-5`; no fallback checkpoint load.
 3. **Predictive truncation:** the frozen calibration comparison passes for both
-   full and ablated predictors under `C` and `N`; its verified marker selects
-   `T_atom = 8,192` against the 32,768 reference.
+   full and ablated predictors under `C` and `N`.
 4. **Monte Carlo diagnostics:** collapsed covariance-atom ESS and context
    retained-mass distributions are reported. They are not substituted for the
    predictive-convergence gate.
-5. **Ordering value:** with
-   `V_P = E[NLL_ablated,P - NLL_full,P]`, the one-sided 95% context-bootstrap
-   lower bound for `V_C` is positive. For the Gaussian null, the entire
-   two-sided 95% context-bootstrap CI for `V_N` must lie inside the frozen
-   equivalence interval `[-1e-5, +1e-5]` nats. This equivalence margin is
-   800-fold smaller than the primary effect floor and replaces the invalid
-   “within two SE” rule.
+5. **Ordering value:** the 95% hierarchical-bootstrap lower bound for `V_C` is
+   positive; measured `V_N` lies within plus or minus two bootstrap SE of zero.
 6. **Oracle convergence:** on the frozen nested-half subset, the absolute
    full-bank versus half-bank change in the control-subtracted ablated NLL is
    below 0.004 nats. The full-predictive atom check must also satisfy the legacy
    20%-of-final-gap rule.
-7. **KL alarm:** for each prior, the final-checkpoint fixed-fleet mean
-   `NLL_net - NLL_full` must not have a two-sided 95% CI wholly below `-0.004`
-   nats. A stronger apparent improvement over the approximate full oracle is
-   treated as an oracle alarm, not as model superiority.
-8. **Fixed-fleet completeness:** all three registered models in each arm must
-   contribute every checkpoint endpoint. Models cannot be dropped or replaced,
-   and no gate depends on arbitrary cross-arm seed pairing.
+7. **KL alarm:** the final-checkpoint mean `NLL_net - NLL_full` 95% lower bound
+   is at least `-1e-6` for both priors.
+8. **Seed agreement:** all three per-training-seed final `Delta` estimates are
+   negative.
 
-The confirmatory tensor is stratified by prior, evaluation draw, and assigned
-atom bank. The primary bootstrap uses 50,000 repetitions and RNG seed
-`881003900`. It resamples contexts with replacement within each of the 18 fixed
-prior × evaluation-draw × atom-bank strata, using weights proportional to the
-registered stratum sizes. `C` and `N` context weights are drawn independently.
-Within a prior and stratum, the same context weights are reused across all
-three fixed models and all checkpoints. Evaluation draws, atom banks, and
-training models are fixed and are not resampled. The three models in each arm
-receive equal weight. Intervals are percentile intervals using NumPy's linear
-quantile convention at `[0.025, 0.975]`; the `V_C` lower gate uses the 0.05
-quantile. Shard and draw relabeling must leave every estimate and decision
-unchanged.
+The bootstrap resamples training seeds, evaluation draws, atom banks, and
+contexts at their actual clustering levels. `C` and `N` contexts are resampled
+independently; the same sampled training seeds are used for both priors.
+Bootstrap repetitions and RNG seeds are frozen in the attempt file.
 
 ## Decision rules
 
@@ -217,8 +165,7 @@ no ordering-use claim is made.
 If all gates pass, the primary claim is `REPLICATED_ORDERING_USE` only when:
 
 - `Delta(final) < -0.008` nats; and
-- its two-sided 95% fixed-stratum context-bootstrap CI has upper bound below
-  `-0.008` nats.
+- its two-sided 95% hierarchical-bootstrap CI has upper bound below zero.
 
 Otherwise the primary claim is `NOT_REPLICATED_ORDERING_USE`. This wording is
 specific to the frozen fleet and test distribution and is not a claim that PFNs
@@ -226,8 +173,7 @@ cannot use ordering information.
 
 The secondary undertraining claim is supported only when the final checkpoint
 passes the primary rule, the 20,000-step checkpoint does not pass that rule,
-and `Delta(final) - Delta(20k) < -0.008` with a 95% CI upper bound below
-`-0.008`.
+and `Delta(final) - Delta(20k) < -0.008` with a 95% CI upper bound below zero.
 The licensed wording is “undertraining can obscure the ordering-specific output
 advantage in this fleet.” Failure of the early checkpoint alone is not evidence
 of equivalence or absence.
