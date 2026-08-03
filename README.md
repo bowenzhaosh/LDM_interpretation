@@ -4,6 +4,23 @@ This repository is an independent, fail-closed rerun of the most essential PFN-D
 
 It does not test whether a Transformer implements Bayes, whether attention is the relevant mechanism, whether evidence is sufficient, or whether the result generalizes beyond the 32 bundled checkpoint hashes.
 
+## Current verification status
+
+- Phase-2 induced-coordinate claims remain unadjudicated. The native mapping
+  qualification failed its preregistered gate, so that readout cannot support
+  either a positive or a negative mechanism claim.
+- The separate Phase-1 oracle qualification passed its finite-panel version-3
+  gates at truncation 16,384. Raw arrays, manifests, independent verification,
+  and replay metadata are archived under
+  `campaigns/phase1_ordering_20260803/oracle_qualification_v3/` and tagged
+  `phase1-ordering-qualification-v3-result`.
+- The first confirmatory rerun targets the narrower output-level claim that the
+  archived d4 fleet eventually exploits predictive information associated
+  with causal ordering. Its preregistration, checkpoint registry, held Slurm
+  launcher, numerical-clearance rules, and independent raw verifier are frozen
+  by `phase1-ordering-confirmation-v1`. No result is claimed until that tagged
+  attempt completes and its raw archive passes post-run audit.
+
 ## Scientific design
 
 The primary panel contains 256 shared 20-row cores. For each core, the oracle-only selector retains the first nine 10-row blocks that satisfy exact posterior-interior and two-bank JS separation gates. The first block is the same-length baseline and the next eight are repeated continuations. Selection uses no PFN output.

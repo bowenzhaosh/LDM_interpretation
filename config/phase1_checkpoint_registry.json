@@ -4,6 +4,14 @@
   "remote_root": "/engrfs/project/class/zhao.b/pfn-dag-e18b/nets4_xlong",
   "model_definition": "artifacts/phase1/d4_train_fleet.py",
   "model_definition_sha256": "22c61ee73a6fb1ea2c8f54d24a8597722e33ca7b562ef5b8ee74d42c38d7f897",
+  "training_sidecars": [
+    {"prior": "C", "seed": 0, "filename": "M4_C_s0_st120000.json", "bytes": 156, "sha256": "da76e1347407aa9920c51505e11b37366d091cb5c1eee6c1db04f7c2f4a9ad1c"},
+    {"prior": "C", "seed": 1, "filename": "M4_C_s1_st120000.json", "bytes": 155, "sha256": "7fdcce17f45098fb68f3366dcd6c0b5270735e1201edb4ec9ad95f9971dcb85a"},
+    {"prior": "C", "seed": 2, "filename": "M4_C_s2_st120000.json", "bytes": 155, "sha256": "9662badc974b6ce131723ff9ce9c682a42a2897b52e90f338d43eec5a785bcc7"},
+    {"prior": "N", "seed": 0, "filename": "M4_N_s0_st120000.json", "bytes": 156, "sha256": "07bd1b54cd15f4be69557c0d08981ced6f4d36b887116cc35f6f4b5a30288153"},
+    {"prior": "N", "seed": 1, "filename": "M4_N_s1_st120000.json", "bytes": 156, "sha256": "e985cc9e308ad62576cd770159e922e4406f152a8f55dd4fcb6a24f0d4c21424"},
+    {"prior": "N", "seed": 2, "filename": "M4_N_s2_st120000.json", "bytes": 156, "sha256": "0e445f28c441029cb3a615f1b35ddcb5314138f65d122c46de173b4158148f3e"}
+  ],
   "records": [
     {"prior": "C", "seed": 0, "checkpoint_step": 20000, "planned_total_steps": 120000, "filename": "M4_C_s0_st120000_ck20000.pt", "bytes": 4344012, "sha256": "7e3d55aaff179bf32b7ba42335a9ecf9e8ce3ae37e5840ec02dadd69ffe3ef35"},
     {"prior": "C", "seed": 0, "checkpoint_step": 60000, "planned_total_steps": 120000, "filename": "M4_C_s0_st120000_ck60000.pt", "bytes": 4344012, "sha256": "fe06a96f384ba555696088b0d49d34fb49976d2e223de005cf65e4550b107c43"},

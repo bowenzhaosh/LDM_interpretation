@@ -1,6 +1,6 @@
 # Phase-1 ordering-use replication preregistration
 
-Status: **CORRECTED CROSS-BANK REQUALIFICATION REQUIRED; CONFIRMATORY RUN PAUSED**
+Status: **QUALIFICATION V3 PASSED; CONFIRMATORY HARNESS UNDER FINAL PRE-RUN AUDIT**
 
 Pre-confirmation code audit found that the version-1 ordering ablation was
 misimplemented after top-K truncation. Within-ordering weights were divided by
@@ -18,6 +18,12 @@ frozen in `PHASE1_ORDERING_QUALIFICATION_V3_PREREG.md`. It uses another fresh
 context namespace, the same three intended confirmatory atom banks, and an
 explicit production-versus-reference quadrature axis. No PFN checkpoint or
 scientific endpoint may be evaluated until qualification v3 passes.
+
+Qualification v3 is the only admissible qualification for confirmation. Only
+its verified artifact may select the truncation, satisfy the
+predictive-truncation gate, or contribute a numerical allowance. The earlier
+calibration and qualification artifacts below are retained only as historical
+lineage and have no confirmatory force.
 
 The registered calibration at commit `e679e74930fc990dc834e0a03aec0a10b582a862`
 passed and selected `T_atom = 8,192` against the 32,768-atom reference. No PFN
@@ -42,7 +48,8 @@ activation intervention appears in this experiment.
 Primary claim:
 
 > In the exact archived d=4 base fleet, the three causal-AL(r=4) models at
-> 120,000 steps have a larger ordering-specific output advantage than the three
+> 120,000 steps outperform the ordering-ablated causal oracle, and this direct
+> advantage is larger than the matched generic output mismatch in the three
 > independently trained Gaussian-control models.
 
 The operational claim is restricted to the archived `nets4_xlong` checkpoint
@@ -88,6 +95,12 @@ labels do not define paired randomizations and are never paired or resampled.
 `Delta` means that the causal-prior PFN beats the ordering-blind reference by
 more than the matched generic output mismatch observed under `N`.
 
+`Delta` is not sufficient by itself: positive excess error in the independent
+`N` fleet could make `Delta` negative even if the `C` fleet exactly matched its
+ordering-ablated oracle. The primary decision therefore requires both a
+negative direct `deficit_C` and a negative `Delta`, under the same frozen
+effect floor and interval rule.
+
 The confirmatory checkpoints are 20,000, 60,000, and final/120,000. The final
 checkpoint is primary; 20,000 and the paired final-minus-early change are
 secondary; 60,000 is descriptive.
@@ -113,8 +126,31 @@ requirements. It uses the separate WashU interpreter and package lock under
 the Python executable, NumPy and Torch payload trees, NumPy/Torch build
 configuration, CPU model and instruction features, active BLAS runtime and
 thread count, CUDA driver, GPU model and capability, deterministic settings,
-and `pip check`. OpenBLAS is fixed to one thread. A resumable attempt is bound
-to that exact fingerprint and has one atomic writer lease.
+and `pip check`. OpenBLAS is fixed to one thread. Each stage is bound to that
+exact fingerprint and has one atomic writer lease. Stages are deliberately
+fail-closed rather than partially resumable: an interrupted stage is retried
+into a new empty output directory under the same immutable attempt identity,
+while sealed upstream stages may be reused.
+
+The isolated, source-bound launcher submits exactly seven held jobs in the
+fixed graph `panel -> {pfn, oracle0, oracle1, oracle2} -> join -> verify`.
+Before releasing any job, it durably records every job ID, exact argument
+vector, dependency, and expected stage in the attempt's `SUBMISSION.json`.
+The receipt enters `READY_TO_RELEASE` before release; wrappers wait for the
+durable `SUBMITTED` transition and recheck it after their stage. A failure
+enters `CANCELLING` before `scancel`, and the receipt reports cancellation only
+after all recorded jobs leave the live queue. An unconfirmed cancellation is
+an explicit failed attempt. A runnable receipt is quarantined first, and a
+receipt-write failure cannot skip the scheduler cancellation attempt. Each
+scientific stage receives one A100,
+eight CPUs, 64 GB memory, an explicit time limit, and a job-ID-specific
+telemetry directory, except that the final NumPy-only verifier requests two
+CPUs and 16 GB without a GPU. The submission client receives only `PATH`,
+`LC_ALL`, `TZ`, and the site-required frozen `SLURM_CONF` path. The locked
+interpreter starts with `-I -S`, uses a per-job telemetry `pycache` prefix, and
+admits only the frozen repository source and locked environment site-packages.
+No other ambient Slurm user environment, inherited `PYTHONPATH`, user-site,
+`.pth`, `sitecustomize`, or `LD_PRELOAD` startup path is allowed.
 
 ## Fresh sampling design
 
@@ -132,10 +168,11 @@ to that exact fingerprint and has one atomic writer lease.
   arrays, native PFN 100-bin log-probabilities, checkpoint hashes, and guard
   measurements are retained.
 
-No confirmatory result may be read until all expected shards are present and
-their hash inventory passes.
+No confirmatory result may be read until all expected shards are present,
+their hash inventory passes, and the required independent raw verification
+stage agrees with the joined result.
 
-## Calibration-only truncation selection
+## Qualification-v3-only truncation selection
 
 Calibration uses a disjoint seed namespace and is excluded from every estimate
 and verdict. It computes predictions at `T_atom` 8,192, 16,384, and the frozen
@@ -219,14 +256,16 @@ Every gate must pass before the primary contrast is interpreted.
 3. **Predictive truncation:** the frozen calibration comparison passes for both
    full and ablated predictors under `C` and `N`; the v3 verified marker selects
    the lowest globally passing value from 8,192 or 16,384 against the 32,768
-   reference, and every v3 quadrature gate passes. The selected value is not
-   fixed until those held-out oracle-only results exist.
+   reference, and every v3 quadrature gate passes. The independent v3 replay
+   selected and froze 16,384 atoms before confirmatory contexts existed.
 4. **Monte Carlo diagnostics:** collapsed covariance-atom ESS and context
    retained-mass distributions are reported. They are not substituted for the
    predictive-convergence gate.
 5. **Ordering value:** with
    `V_P = E[NLL_ablated,P - NLL_full,P]`, the one-sided 95% context-bootstrap
-   lower bound for `V_C` is positive. For the Gaussian null, the entire
+   lower bound for `V_C` must exceed the total `0.001`-nat numerical clearance.
+   For the Gaussian null, whose population ordering value is exactly zero, the
+   entire
    two-sided 95% context-bootstrap CI for `V_N` must lie inclusively inside the
    frozen equivalence interval `[-1e-5, +1e-5]` nats: the lower endpoint is at
    least `-1e-5` and the upper endpoint is at most `+1e-5`. This margin is
@@ -236,18 +275,28 @@ Every gate must pass before the primary contrast is interpreted.
    original stream indices `0..199`, separately for each prior. This gives 200
    rows per prior, allocated across atom banks by the same `stream_index % 3`
    rule as the full panel. For this subset define
-   `d_P = mean(NLL_ablated,3M - NLL_ablated,1.5M)`. The gate requires
-   `abs(d_C - d_N) < 0.004` nats. Also define
+   `d_P = mean(NLL_ablated,3M - NLL_ablated,1.5M)`. The entire two-sided 95%
+   bootstrap CI for direct `d_C` must lie strictly inside
+   `[-0.0005, +0.0005]` nats, and the entire corresponding CI for the
+   control-subtracted `d_C-d_N` must lie strictly inside that same interval.
+   Also define
    `e_P = mean(NLL_full,3M - NLL_full,1.5M)` and
    `g_P = mean_models mean(NLL_net,final - NLL_full,3M)` on these same rows,
    with equal weight on the three fixed models. Separately for `C` and `N`, the
-   full-predictive atom gate requires `g_P > 0` and
-   `abs(e_P) < 0.20 * g_P`. The 1.5M calculation uses the first 1,500,000 atoms
-   of the same registered 3M bank and reselects top `T_atom` within that prefix.
+   full-predictive atom gate requires the one-sided 95% bootstrap lower bound
+   for `g_P` to be positive. The entire two-sided 95% CI for `e_P` must lie
+   strictly inside `[-0.0005, +0.0005]` nats, and its largest absolute endpoint
+   must be less than 20% of that positive `g_P` lower bound. The 1.5M
+   calculation uses the first 1,500,000 atoms of the same registered 3M bank
+   and reselects top `T_atom` within that prefix.
 7. **KL alarm:** for each prior, the final-checkpoint fixed-fleet mean
-   `NLL_net - NLL_full` must not have a two-sided 95% CI wholly below `-0.004`
-   nats. A stronger apparent improvement over the approximate full oracle is
-   treated as an oracle alarm, not as model superiority.
+   `NLL_net - NLL_full` uses `-0.004` nats as the nominal alarm threshold. Its
+   two-sided 95% CI upper endpoint must be at least `-0.003` to clear after
+   numerical allowance. An upper endpoint below `-0.005` is an oracle alarm;
+   an endpoint from `-0.005` inclusive to `-0.003` exclusive is numerically
+   inconclusive and fails this validity gate. A stronger apparent improvement
+   over the approximate full oracle is treated as an oracle alarm, not as
+   model superiority.
 8. **Fixed-fleet completeness:** all three registered models in each arm must
    contribute every checkpoint endpoint. Models cannot be dropped or replaced,
    and no gate depends on arbitrary cross-arm seed pairing.
@@ -270,25 +319,53 @@ for every model and checkpoint. The SHA-256 of each generated index stream is
 retained. Shard and draw display-label relabeling, file-discovery order, model
 order, and row storage order must leave every estimate and decision unchanged.
 
+The nested-half convergence gate uses a separate 50,000-replicate stratified
+`PCG64` bootstrap. Its namespace is `1212238918`, and each generator is
+initialized by `SeedSequence([881003900, 1212238918, prior_code, atom_seed])`.
+The 200 rows per prior form atom-bank strata of 67, 67, and 66 rows. Indices are
+generated in canonical replicate order in chunks of 256, reused for `d_P`,
+`e_P`, and `g_P`, and content-hashed. It uses the same percentile intervals,
+linear quantile convention, and one-sided 0.05 quantile specified above.
+
 ## Decision rules
 
 If any validity gate fails, the result is `INCONCLUSIVE_PHASE1_INSTRUMENT` and
 no ordering-use claim is made.
 
-If all gates pass, the primary claim is `REPLICATED_ORDERING_USE` only when:
+If all gates pass, the nominal primary effect floor remains `-0.008` nats. The
+nominal diagnostic holds only when all of the following are true:
 
+- `deficit_C(final) < -0.008` nats;
+- the two-sided 95% fixed-stratum context-bootstrap CI for
+  `deficit_C(final)` has upper bound below `-0.008` nats;
 - `Delta(final) < -0.008` nats; and
 - its two-sided 95% fixed-stratum context-bootstrap CI has upper bound below
   `-0.008` nats.
 
-Otherwise the primary claim is `NOT_REPLICATED_ORDERING_USE`. This wording is
-specific to the frozen fleet and test distribution and is not a claim that PFNs
-cannot use ordering information.
+Qualification v3 supports a `0.0005`-nat top-K-plus-quadrature allowance. The
+nested-half atom-bank gate contributes a separate `0.0005`-nat allowance, so
+the registered total primary numerical clearance is `0.001` nats. For each of
+the two final endpoints, direct `deficit_C` and control-subtracted `Delta`, the
+decision endpoint is the larger of its point estimate and two-sided 95% CI
+upper bound.
+
+A positive call requires both decision endpoints to lie strictly below
+`-0.009`. If either decision endpoint is at least `-0.007`, the result is
+`NOT_REPLICATED_ORDERING_USE`. Every remaining combination lies in the
+symmetric gray zone around the nominal `-0.008` floor and yields
+`INCONCLUSIVE_PHASE1_NUMERICAL_CLEARANCE`. That result requires the registered
+32,768-atom, 64/256-node reference-oracle rerun under a fresh locked attempt
+before any claim. The negative wording is specific to the frozen fleet and test
+distribution and is not a claim that PFNs cannot use ordering information.
 
 The secondary undertraining claim is supported only when the final checkpoint
-passes the primary rule, the 20,000-step checkpoint does not pass that rule,
-and `Delta(final) - Delta(20k) < -0.008` with a 95% CI upper bound below
-`-0.008`.
+passes the numerically cleared primary rule, at least one of the 20,000-step
+direct or control-subtracted decision endpoints is at least `-0.007`,
+`deficit_C(final) - deficit_C(20k) < -0.008`, and
+`Delta(final) - Delta(20k) < -0.008`, with both corresponding 95% CI upper
+bounds below `-0.008`. The clearance margin is not applied to these changes:
+the same oracle row is subtracted at both checkpoints and cancels exactly under
+the shared bootstrap indices.
 The licensed wording is “undertraining can obscure the ordering-specific output
 advantage in this fleet.” Failure of the early checkpoint alone is not evidence
 of equivalence or absence.
@@ -299,4 +376,9 @@ Calibration may expose only runtime, memory, normalization, retention, ESS,
 and full-versus-half oracle differences. It must not score PFN checkpoints or
 compute `deficit`, `Delta`, capture, or any scientific endpoint. Confirmatory
 scripts may write raw arrays and mechanical integrity state, but the join step
-is the only component allowed to compute the scientific decision.
+is the only pipeline component allowed to compute the scientific decision.
+The required seventh `verify` stage then independently reconstructs all point
+estimates, bootstrap intervals, validity gates, and the decision from the raw
+joined arrays and frozen configuration without importing a confirmation
+pipeline module. It must agree exactly on the decision and within registered
+numerical tolerances on every derived quantity before the result is licensed.
