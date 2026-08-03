@@ -30,7 +30,7 @@ The first run validates the independent oracle and multi-query mixture coordinat
 
 ## Cost controls
 
-The smoke run measures end-to-end CPU time, peak memory, and compressed bytes per context. The locked full-run limits are 45 minutes, 16 GB RAM, and 2 GB compressed raw output. The runner stops before unblinding if extrapolated cost exceeds a limit.
+The smoke run measures end-to-end CPU time, peak memory, compressed bytes per context, the current-commit replay Git bundle, and the tracked repository tree. The locked full-run limits are 45 minutes, 16 GB RAM, and 2 GB sealed-archive output. Final sealing checks the actual tar-file size. The runner stops before unblinding if extrapolated cost exceeds a limit.
 
 ## Execution record
 
@@ -47,3 +47,14 @@ This section is append-only once tests begin. It records exact commands, failure
 - Fresh crossed-bootstrap validation used 500 datasets per slope and 1,000 bootstrap draws per dataset. Coverage was 0.940 at slope 0.8, 0.948 at slope 1.0, and 0.944 at slope 1.2. Every Wilson interval contained 0.95.
 - The first legacy replay command failed because the copied snapshot also imports `d5c_analyze.py`. That dependency was copied into `artifacts/source_snapshots/`, added to the content-addressed registry, and both legacy checks then passed.
 - After the final repairs, `python -m pytest -q` reported 32 passed tests. Four targeted audit rechecks returned `SOUND` with no blocking or major finding. The tree is ready for the immutable pre-run commit.
+
+### 2026-08-03 version-2 guard failure and version-3 repair
+
+- Commit `d0b049d6241845e55443f4950e52b70644b2b1ab` generated a complete 256 by 8 scientific panel. Its SHA-256 is `0fe740746163202cc4a30a1b1081655d6adc7024a4e82e75f192c37ecaf78398`.
+- Scoring stopped before the prediction directory was created. One checkpoint-bank record exceeded the frozen batch-1 versus batch-64 ceiling: `1.1324882507324219e-6` versus `1e-6`. No model probability shard, induced coordinate, slope, interval, or claim verdict was generated.
+- The frozen run remains at `runs/scientific-d0b049d` with only `panel.npz` and `panel.json`. It is `BLOCKED_GUARD` and will not be resumed or reused.
+- One-variable diagnostics found deterministic float32 physical-shape variation in `query_embed` and `out_head`. Batch sizes 2 through 64 were byte-identical for the worst context. Fixed batch-64 outputs were unchanged when the context moved position or all companions changed. Float64 reduced the discrepancy to machine precision.
+- A failing regression test was added first. The root repair keeps production batch size 64, makes singleton drift descriptive, adds byte-exact batch-axis and companion-replacement checks, requires complete production batches, persists the guard record before failure, and locks every live PyTorch inference setting inside scientific scoring.
+- The final independent validation design uses fixed seeds `860003` through `860007`, both 20-row and 30-row context shapes, all 32 checkpoints, and both query banks. Its artifacts must be regenerated after the source freezes; earlier intermediate values are not accepted by the current producer hashes.
+- The initial validation command failed before writing an artifact because `generate_group` requires at least two continuations. Changing the validation-only request from one to two continuations fixed that direct API mismatch; the validation still consumes only its first continuation.
+- Subsequent source audits added exact legacy-import provenance, installed-package payload verification, self-contained Git-bundle replay, guard-seeded cumulative scoring and cumulative derivation accounting, strict panel resource metadata, exact sealed-tar accounting, and a separate noncanonical Gitless replay path that cannot weaken the canonical archive gate. A structural end-to-end smoke on the repaired path passed before final artifact regeneration. Fresh validation artifacts, all five final audit records, readiness, run lock, commit, and a new commit-derived panel remain required.

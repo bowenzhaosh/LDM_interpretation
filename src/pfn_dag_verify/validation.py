@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from .generative import generate_group
+from .evaluation import production_shape_diagnostics
 from .instrument import (
     UnidentifiableError,
     project_coordinate,
@@ -14,7 +16,15 @@ from .instrument import (
 )
 from .oracle import GridOracle, ScalarGridOracle
 from .query_bank import FIXED_SENSITIVITY_BANK
-from .registry import sha256_file
+from .model import configure_determinism, load_registered_checkpoint
+from .provenance import verify_runtime
+from .registry import (
+    expanded_checkpoint_record,
+    load_checkpoint_registry,
+    package_source_hashes,
+    sha256_file,
+    validation_input_hashes,
+)
 from .statistics import crossed_bootstrap_slope, permutation_null_slopes
 
 
@@ -34,7 +44,134 @@ def _unit_contexts(count: int = 64):
     return contexts[:count]
 
 
+def _batch_validation_contexts(seed: int, count: int = 64) -> dict[str, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    core_contexts = []
+    target_contexts = []
+    for _ in range(count):
+        group = generate_group(rng, n_continuations=2)
+        core_contexts.append(group.core)
+        target_contexts.append(
+            np.concatenate([group.core, group.continuations[0]], axis=0)
+        )
+    return {
+        "core20": np.stack(core_contexts, axis=0),
+        "length30": np.stack(target_contexts, axis=0),
+    }
+
+
+def _array_sha256(value: np.ndarray) -> str:
+    return hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
+
+
+def validate_batch_shape(
+    *,
+    query_banks: np.ndarray,
+    registry_path: Path,
+) -> dict:
+    """Validate production-shape invariants on a fixed disjoint context stream."""
+
+    started = time.perf_counter()
+    configure_determinism(0)
+    verify_runtime()
+    query_banks = np.asarray(query_banks, dtype=np.float64)
+    if query_banks.shape != (2, 8):
+        raise ValueError("batch-shape validation requires two eight-query banks")
+    validation_seed = 860003
+    companion_seed = 860004
+    batch_permutation_seed = 860005
+    row_permutation_seeds = {"core20": 860006, "length30": 860007}
+    samples = _batch_validation_contexts(validation_seed)
+    companion_samples = _batch_validation_contexts(companion_seed)
+    batch_permutation = np.random.default_rng(batch_permutation_seed).permutation(64)
+    row_permutations = {
+        kind: np.random.default_rng(row_permutation_seeds[kind]).permutation(
+            sample.shape[1]
+        )
+        for kind, sample in samples.items()
+    }
+    registry = load_checkpoint_registry(registry_path)
+    records = []
+    for seed in range(16):
+        for step in (0, 12_000):
+            checkpoint = expanded_checkpoint_record(registry, seed, step)
+            model = load_registered_checkpoint(checkpoint)
+            for bank_index, queries in enumerate(query_banks):
+                for context_kind, sample in samples.items():
+                    records.append(
+                        {
+                            "seed": seed,
+                            "step": step,
+                            "bank_index": bank_index,
+                            "context_kind": context_kind,
+                            "checkpoint_sha256": checkpoint["sha256"],
+                            **production_shape_diagnostics(
+                                model,
+                                sample,
+                                companion_samples[context_kind],
+                                queries,
+                                batch_permutation=batch_permutation,
+                                row_permutation=row_permutations[context_kind],
+                            ),
+                        }
+                    )
+            del model
+    passed = bool(len(records) == 128 and all(record["pass"] for record in records))
+    return {
+        "schema_version": 1,
+        "producer_sha256": sha256_file(Path(__file__)),
+        "implementation_sha256s": package_source_hashes(),
+        "input_sha256s": validation_input_hashes(),
+        "validation_kind": "fixed-production-shape-v2",
+        "validation_seed": validation_seed,
+        "companion_seed": companion_seed,
+        "batch_permutation_seed": batch_permutation_seed,
+        "row_permutation_seeds": row_permutation_seeds,
+        "contexts_per_kind": 64,
+        "context_kinds": list(samples),
+        "context_rows": {kind: int(sample.shape[1]) for kind, sample in samples.items()},
+        "production_batch_size": 64,
+        "identities_checked": 32,
+        "banks_checked": 2,
+        "sample_sha256s": {
+            kind: _array_sha256(sample) for kind, sample in samples.items()
+        },
+        "companion_sample_sha256s": {
+            kind: _array_sha256(sample) for kind, sample in companion_samples.items()
+        },
+        "query_banks": query_banks.tolist(),
+        "query_banks_sha256": _array_sha256(query_banks),
+        "registry_sha256": sha256_file(registry_path),
+        "production_replay_byte_identical": all(
+            record["production_replay_byte_identical"] for record in records
+        ),
+        "batch_axis_permutation_byte_identical": all(
+            record["batch_axis_permutation_byte_identical"] for record in records
+        ),
+        "companion_replacement_byte_identical": all(
+            record["companion_replacement_byte_identical"] for record in records
+        ),
+        "max_batch_axis_permutation_error": max(
+            record["max_batch_axis_permutation_error"] for record in records
+        ),
+        "max_companion_replacement_error": max(
+            record["max_companion_replacement_error"] for record in records
+        ),
+        "max_row_permutation_error": max(
+            record["max_row_permutation_error"] for record in records
+        ),
+        "descriptive_max_batch_1_vs_64_error": max(
+            record["descriptive_max_batch_1_vs_64_error"] for record in records
+        ),
+        "records": records,
+        "pass": passed,
+        "wall_seconds": time.perf_counter() - started,
+    }
+
+
 def validate_instrument(queries: np.ndarray, quadrature: int = 15, bank_role: str = "primary"):
+    configure_determinism(0)
+    verify_runtime()
     started = time.perf_counter()
     vector = GridOracle(queries=queries, quadrature=quadrature)
     scalar = ScalarGridOracle(queries=queries, quadrature=quadrature)
@@ -125,6 +262,8 @@ def validate_instrument(queries: np.ndarray, quadrature: int = 15, bank_role: st
     result = {
         "schema_version": 1,
         "producer_sha256": sha256_file(Path(__file__)),
+        "implementation_sha256s": package_source_hashes(),
+        "input_sha256s": validation_input_hashes(),
         "quadrature": quadrature,
         "query_bank": np.asarray(queries).tolist(),
         "bank_role": bank_role,
@@ -166,6 +305,8 @@ def validate_instrument(queries: np.ndarray, quadrature: int = 15, bank_role: st
 def validate_bootstrap_coverage(
     *, datasets_per_slope: int = 500, bootstraps: int = 1_000, groups: int = 256
 ):
+    configure_determinism(0)
+    verify_runtime()
     started = time.perf_counter()
     rng = np.random.default_rng(850002)
     results = {}
@@ -209,6 +350,8 @@ def validate_bootstrap_coverage(
     return {
         "schema_version": 1,
         "producer_sha256": sha256_file(Path(__file__)),
+        "implementation_sha256s": package_source_hashes(),
+        "input_sha256s": validation_input_hashes(),
         "datasets_per_slope": datasets_per_slope,
         "bootstraps_per_dataset": bootstraps,
         "groups": groups,
@@ -236,6 +379,10 @@ def main(argv=None):
     coverage.add_argument("--out", type=Path, required=True)
     coverage.add_argument("--datasets-per-slope", type=int, default=500)
     coverage.add_argument("--bootstraps", type=int, default=1_000)
+    batch_shape = subparsers.add_parser("batch-shape")
+    batch_shape.add_argument("--query-bank", type=Path, required=True)
+    batch_shape.add_argument("--registry", type=Path, required=True)
+    batch_shape.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "instrument":
         if args.bank == "primary":
@@ -245,10 +392,18 @@ def main(argv=None):
         result = validate_instrument(
             np.asarray(bank, dtype=np.float64), bank_role=args.bank
         )
-    else:
+    elif args.command == "coverage":
         result = validate_bootstrap_coverage(
             datasets_per_slope=args.datasets_per_slope,
             bootstraps=args.bootstraps,
+        )
+    else:
+        primary = json.loads(args.query_bank.read_text())["selected_queries"]
+        result = validate_batch_shape(
+            query_banks=np.stack(
+                [np.asarray(primary, dtype=np.float64), FIXED_SENSITIVITY_BANK]
+            ),
+            registry_path=args.registry,
         )
     _write_json(args.out, result)
     print(json.dumps(result, sort_keys=True))

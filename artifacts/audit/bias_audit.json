@@ -1,7 +1,9 @@
 {
-  "claim_scope": "selected identifiable-interior AL40 replace-10 regime",
-  "files": {
-    "AUDIT.md": "471c4d884f899fc2a01660fac0a468a83ef09cd0dbabbba70b298d11b5837afa",
+  "blocking_findings": [],
+  "disposition": "AMENDMENT_JUSTIFIED",
+  "lens": "bias_audit",
+  "major_findings": [],
+  "reviewed_subject_sha256s": {
     "HARNESS.md": "c4df9b53c9446fe1e868907b1dda7ac22be63fe664349ac26cc9087cd6b2b2e6",
     "PREREG.md": "cf8d5d5b5d523ed1cfb204b954b873d17459a8b47f027dbd6c6329e9c4f6a698",
     "README.md": "c0c2368a1df9f56f8fb6be91217bd2e19880a98eb4e3a8dd78a6aa61ed232abf",
@@ -13,7 +15,6 @@
     "artifacts/validation/legacy_oracle_primary.json": "776a55fc97758521ab951d82c1bc1a92ea9c4c9d55421beb3027109a5993bb63",
     "artifacts/validation/legacy_oracle_sensitivity.json": "7671d269eca82c78deece1fcc2a3c876f5f1fab8fd73d87e1ceca0ccdf14fe1c",
     "artifacts/validation/smoke_budget.json": "9aaa638a08b699457d5e7f7031ba3edcdc34985341a1d196ba59efe0576c0e8f",
-    "config/audit_readiness.json": "eba285944b2ef401b270c6d9f9eeecd43fa8ace9b3e5f34eba717d3e11536979",
     "config/checkpoint_registry.json": "5f7c77e033a86e9217e892eeb9001c6928b46340c83cb2710e5fdfa1ebe25bb8",
     "config/query_bank.json": "6e6fdda9741f1db3bbe14c8251f74b17e783ccd541fe19b26b5bb6bfa869af33",
     "environment/installed-distributions.json": "9ee1ffea1bb363d907b44f8fd14c8638670a3f7d9940f362ebdaeb6ebcb00792",
@@ -57,33 +58,7 @@
     "tests/test_storage_and_registry.py": "60a0aea8d3658d85f89ad3ebec674048690d4d3743a8ddc49211af4e97b4c150",
     "tests/test_validation_smoke.py": "674e7b190ee44fe2036b10bdc8df4381964c0e2580bc5570a9ffe8343106d004"
   },
-  "required_validations": [
-    "artifacts/validation/batch_shape.json",
-    "artifacts/validation/bootstrap_coverage.json",
-    "artifacts/validation/instrument_primary.json",
-    "artifacts/validation/instrument_sensitivity.json",
-    "artifacts/validation/legacy_oracle_primary.json",
-    "artifacts/validation/legacy_oracle_sensitivity.json",
-    "artifacts/validation/smoke_budget.json"
-  ],
+  "reviewer_record": "Premise-free final audit by /root/oracle_api with independent blind corroboration; 53-file subject set hash-reviewed; all seven fresh validations checked for contamination by d0b049d; no blocking or major finding.",
   "schema_version": 1,
-  "settings": {
-    "bootstrap_replicates": 10000,
-    "continuations": 8,
-    "groups": 256,
-    "interval_quantiles": [
-      0.02,
-      0.98
-    ],
-    "max_blocks_per_core": 512,
-    "max_core_candidates": 2000,
-    "min_within_group_sd": 0.25,
-    "model_batch_size": 64,
-    "permutation_replicates": 2000,
-    "smoke_stream": {
-      "continuations": 8,
-      "groups": 8,
-      "label": "smoke-v3"
-    }
-  }
+  "summary": "The batch-guard amendment prospectively replaces an off-estimand singleton physical-shape comparison. The failed d0b049d stream remains blocked, contains no predictions or scientific metrics, is blacklisted, and is neither resumed nor reinterpreted."
 }

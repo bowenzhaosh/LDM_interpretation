@@ -1,11 +1,48 @@
 {
-  "claim_scope": "selected identifiable-interior AL40 replace-10 regime",
-  "files": {
+  "audit_evidence_sha256s": {
+    "bias_audit": "e2f28e965f8fc91b3ed09aeb58eb68f3e742d399bbf45bce3880ab123014c284",
+    "configuration_plumbing": "f6775d641b6195d1c44e61d3bd4924b7075f1c4100e457f1f2b93458977b5495",
+    "metric_validity": "3b3d0969b81132a8f8652ab297a957dc3d17ca60df388cac0f8456a2ce752098",
+    "numerical_determinism": "c7c7ca7cbb09accc21e504c5c3337303bf90bcf31f20b7cda6035a5719bf75a1",
+    "replay_portability": "4af1e3918585a168edde44a8cc78347e68e123b5f4128cb73d1b31c5a45e202f"
+  },
+  "audits": {
+    "bias_audit": "AMENDMENT_JUSTIFIED",
+    "configuration_plumbing": "SOUND",
+    "metric_validity": "SOUND",
+    "numerical_determinism": "SOUND",
+    "replay_portability": "SOUND"
+  },
+  "disposition": "READY_V3",
+  "failed_stream": {
+    "commit_sha": "d0b049d6241845e55443f4950e52b70644b2b1ab",
+    "prediction_shards": 0,
+    "scientific_metrics": 0,
+    "status": "BLOCKED_GUARD"
+  },
+  "protocol_version": 3,
+  "required_validations": [
+    "artifacts/validation/batch_shape.json",
+    "artifacts/validation/bootstrap_coverage.json",
+    "artifacts/validation/instrument_primary.json",
+    "artifacts/validation/instrument_sensitivity.json",
+    "artifacts/validation/legacy_oracle_primary.json",
+    "artifacts/validation/legacy_oracle_sensitivity.json",
+    "artifacts/validation/smoke_budget.json"
+  ],
+  "schema_version": 1,
+  "scientific_outputs_observed": false,
+  "subject_sha256s": {
     "AUDIT.md": "471c4d884f899fc2a01660fac0a468a83ef09cd0dbabbba70b298d11b5837afa",
     "HARNESS.md": "c4df9b53c9446fe1e868907b1dda7ac22be63fe664349ac26cc9087cd6b2b2e6",
     "PREREG.md": "cf8d5d5b5d523ed1cfb204b954b873d17459a8b47f027dbd6c6329e9c4f6a698",
     "README.md": "c0c2368a1df9f56f8fb6be91217bd2e19880a98eb4e3a8dd78a6aa61ed232abf",
     "SOURCE_ORIGIN.md": "55f38345be0e5228ce99ff4fe65d3b0b59e4c7f4e6124b0f8cbff2eda02f5695",
+    "artifacts/audit/bias_audit.json": "e2f28e965f8fc91b3ed09aeb58eb68f3e742d399bbf45bce3880ab123014c284",
+    "artifacts/audit/configuration_plumbing.json": "f6775d641b6195d1c44e61d3bd4924b7075f1c4100e457f1f2b93458977b5495",
+    "artifacts/audit/metric_validity.json": "3b3d0969b81132a8f8652ab297a957dc3d17ca60df388cac0f8456a2ce752098",
+    "artifacts/audit/numerical_determinism.json": "c7c7ca7cbb09accc21e504c5c3337303bf90bcf31f20b7cda6035a5719bf75a1",
+    "artifacts/audit/replay_portability.json": "4af1e3918585a168edde44a8cc78347e68e123b5f4128cb73d1b31c5a45e202f",
     "artifacts/validation/batch_shape.json": "68a78760a0c6b77fa2f7082fa1f9d0b2540ea13a40bc0d7c05018e9967cc7730",
     "artifacts/validation/bootstrap_coverage.json": "d5f1943ec0df760a6dd0f8409edbdf5078332fff0ab1ec7ad19c461cb1845030",
     "artifacts/validation/instrument_primary.json": "eb9f32ce2009007ba6cb7ee4bcd2d8c7a7ff20bf08e7a0e2589315904bed140a",
@@ -13,7 +50,6 @@
     "artifacts/validation/legacy_oracle_primary.json": "776a55fc97758521ab951d82c1bc1a92ea9c4c9d55421beb3027109a5993bb63",
     "artifacts/validation/legacy_oracle_sensitivity.json": "7671d269eca82c78deece1fcc2a3c876f5f1fab8fd73d87e1ceca0ccdf14fe1c",
     "artifacts/validation/smoke_budget.json": "9aaa638a08b699457d5e7f7031ba3edcdc34985341a1d196ba59efe0576c0e8f",
-    "config/audit_readiness.json": "eba285944b2ef401b270c6d9f9eeecd43fa8ace9b3e5f34eba717d3e11536979",
     "config/checkpoint_registry.json": "5f7c77e033a86e9217e892eeb9001c6928b46340c83cb2710e5fdfa1ebe25bb8",
     "config/query_bank.json": "6e6fdda9741f1db3bbe14c8251f74b17e783ccd541fe19b26b5bb6bfa869af33",
     "environment/installed-distributions.json": "9ee1ffea1bb363d907b44f8fd14c8638670a3f7d9940f362ebdaeb6ebcb00792",
@@ -57,33 +93,8 @@
     "tests/test_storage_and_registry.py": "60a0aea8d3658d85f89ad3ebec674048690d4d3743a8ddc49211af4e97b4c150",
     "tests/test_validation_smoke.py": "674e7b190ee44fe2036b10bdc8df4381964c0e2580bc5570a9ffe8343106d004"
   },
-  "required_validations": [
-    "artifacts/validation/batch_shape.json",
-    "artifacts/validation/bootstrap_coverage.json",
-    "artifacts/validation/instrument_primary.json",
-    "artifacts/validation/instrument_sensitivity.json",
-    "artifacts/validation/legacy_oracle_primary.json",
-    "artifacts/validation/legacy_oracle_sensitivity.json",
-    "artifacts/validation/smoke_budget.json"
-  ],
-  "schema_version": 1,
-  "settings": {
-    "bootstrap_replicates": 10000,
-    "continuations": 8,
-    "groups": 256,
-    "interval_quantiles": [
-      0.02,
-      0.98
-    ],
-    "max_blocks_per_core": 512,
-    "max_core_candidates": 2000,
-    "min_within_group_sd": 0.25,
-    "model_batch_size": 64,
-    "permutation_replicates": 2000,
-    "smoke_stream": {
-      "continuations": 8,
-      "groups": 8,
-      "label": "smoke-v3"
-    }
-  }
+  "test_command": "python -m pytest -q tests",
+  "test_output_sha256": "0ad309f72a4df37cb7bf959d3935f94789c728b17a897d8b99c8fdc69692f734",
+  "tests_collected": 63,
+  "tests_passed": 63
 }

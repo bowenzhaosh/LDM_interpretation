@@ -1,14 +1,24 @@
+import base64
+import csv
 import hashlib
+import importlib
 import importlib.metadata
 import json
+import os
 import platform
 import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 
-from .registry import sha256_file
+from .registry import (
+    load_checkpoint_registry,
+    package_source_hashes,
+    sha256_file,
+    validation_input_hashes,
+)
 from .query_bank import FIXED_SENSITIVITY_BANK
 
 
@@ -18,7 +28,28 @@ REQUIRED_VALIDATIONS = {
     "artifacts/validation/legacy_oracle_primary.json",
     "artifacts/validation/legacy_oracle_sensitivity.json",
     "artifacts/validation/bootstrap_coverage.json",
+    "artifacts/validation/batch_shape.json",
     "artifacts/validation/smoke_budget.json",
+}
+RUN_LOCK_SETTINGS = {
+    "groups": 256,
+    "continuations": 8,
+    "max_core_candidates": 2000,
+    "max_blocks_per_core": 512,
+    "min_within_group_sd": 0.25,
+    "bootstrap_replicates": 10000,
+    "permutation_replicates": 2000,
+    "interval_quantiles": [0.02, 0.98],
+    "model_batch_size": 64,
+    "smoke_stream": {"label": "smoke-v3", "groups": 8, "continuations": 8},
+}
+RUN_LOCK_CLAIM_SCOPE = "selected identifiable-interior AL40 replace-10 regime"
+RUN_LOCK_KEYS = {
+    "schema_version",
+    "files",
+    "required_validations",
+    "settings",
+    "claim_scope",
 }
 
 
@@ -33,6 +64,7 @@ def expected_run_lock_files(root: Path | None = None) -> set[str]:
         "pyproject.toml",
         "config/query_bank.json",
         "config/checkpoint_registry.json",
+        "config/audit_readiness.json",
         "environment/requirements-lock.txt",
         "environment/runtime.json",
         "environment/installed-distributions.json",
@@ -50,9 +82,179 @@ WALL_CAP_SECONDS = 45 * 60
 MEMORY_CAP_BYTES = 16 * 2**30
 RAW_CAP_BYTES = 2 * 2**30
 
+EXPECTED_AUDIT_DISPOSITIONS = {
+    "metric_validity": "SOUND",
+    "numerical_determinism": "SOUND",
+    "configuration_plumbing": "SOUND",
+    "replay_portability": "SOUND",
+    "bias_audit": "AMENDMENT_JUSTIFIED",
+}
+AUDIT_EVIDENCE_FILES = {
+    lens: f"artifacts/audit/{lens}.json" for lens in EXPECTED_AUDIT_DISPOSITIONS
+}
+
 
 def repository_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def scientific_run_directory(
+    commit_sha: str, repo: str | Path | None = None
+) -> Path:
+    root = repository_root() if repo is None else Path(repo).resolve()
+    if len(commit_sha) < 7:
+        raise ValueError("scientific run directory requires a full commit SHA")
+    return root / "runs" / f"scientific-{commit_sha[:7]}"
+
+
+def require_scientific_run_path(
+    path: str | Path,
+    *,
+    commit_sha: str,
+    relative: str | Path,
+    repo: str | Path | None = None,
+) -> Path:
+    root = repository_root() if repo is None else Path(repo).resolve()
+    expected = scientific_run_directory(commit_sha, root) / relative
+    observed = Path(os.path.abspath(path))
+    if observed != expected:
+        raise ValueError(f"scientific path must be commit-named: {expected}")
+    relative_observed = observed.relative_to(root)
+    cursor = root
+    for part in relative_observed.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError(f"scientific path cannot traverse a symlink: {cursor}")
+    return observed
+
+
+def audit_readiness_subject_files(root: str | Path | None = None) -> set[str]:
+    root_path = repository_root() if root is None else Path(root).resolve()
+    fixed = {
+        "PREREG.md",
+        "HARNESS.md",
+        "AUDIT.md",
+        "README.md",
+        "SOURCE_ORIGIN.md",
+        "pyproject.toml",
+        "config/query_bank.json",
+        "config/checkpoint_registry.json",
+        "environment/requirements-lock.txt",
+        "environment/runtime.json",
+        "environment/installed-distributions.json",
+        *AUDIT_EVIDENCE_FILES.values(),
+        *REQUIRED_VALIDATIONS,
+    }
+    python_files = {
+        path.relative_to(root_path).as_posix()
+        for parent in (root_path / "src", root_path / "tests")
+        for path in parent.rglob("*.py")
+    }
+    return fixed | python_files
+
+
+def audit_review_subject_files(root: str | Path | None = None) -> set[str]:
+    root_path = repository_root() if root is None else Path(root).resolve()
+    fixed = {
+        "PREREG.md",
+        "HARNESS.md",
+        "README.md",
+        "SOURCE_ORIGIN.md",
+        "pyproject.toml",
+        "config/query_bank.json",
+        "config/checkpoint_registry.json",
+        "environment/requirements-lock.txt",
+        "environment/runtime.json",
+        "environment/installed-distributions.json",
+        *REQUIRED_VALIDATIONS,
+    }
+    python_files = {
+        path.relative_to(root_path).as_posix()
+        for parent in (root_path / "src", root_path / "tests")
+        for path in parent.rglob("*.py")
+    }
+    return fixed | python_files
+
+
+def validate_audit_evidence(repo: str | Path | None = None) -> dict[str, dict]:
+    root = repository_root() if repo is None else Path(repo).resolve()
+    reviewed_hashes = {
+        relative: sha256_file(root / relative)
+        for relative in sorted(audit_review_subject_files(root))
+    }
+    evidence = {}
+    expected_keys = {
+        "schema_version",
+        "lens",
+        "disposition",
+        "reviewed_subject_sha256s",
+        "blocking_findings",
+        "major_findings",
+        "summary",
+        "reviewer_record",
+    }
+    for lens, relative in AUDIT_EVIDENCE_FILES.items():
+        value = json.loads((root / relative).read_text())
+        if (
+            set(value) != expected_keys
+            or value.get("schema_version") != 1
+            or value.get("lens") != lens
+            or value.get("disposition") != EXPECTED_AUDIT_DISPOSITIONS[lens]
+            or value.get("reviewed_subject_sha256s") != reviewed_hashes
+            or value.get("blocking_findings") != []
+            or value.get("major_findings") != []
+            or not isinstance(value.get("summary"), str)
+            or not value["summary"].strip()
+            or not isinstance(value.get("reviewer_record"), str)
+            or not value["reviewer_record"].strip()
+        ):
+            raise ValueError(f"audit evidence mismatch: {lens}")
+        evidence[lens] = value
+    return evidence
+
+
+def validate_audit_readiness(repo: str | Path | None = None) -> dict:
+    root = repository_root() if repo is None else Path(repo).resolve()
+    path = root / "config" / "audit_readiness.json"
+    value = json.loads(path.read_text())
+    expected_hashes = {
+        relative: sha256_file(root / relative)
+        for relative in sorted(audit_readiness_subject_files(root))
+    }
+    expected_failure = {
+        "commit_sha": "d0b049d6241845e55443f4950e52b70644b2b1ab",
+        "status": "BLOCKED_GUARD",
+        "prediction_shards": 0,
+        "scientific_metrics": 0,
+    }
+    audit_evidence = validate_audit_evidence(root)
+    expected_audit_hashes = {
+        lens: sha256_file(root / relative)
+        for lens, relative in AUDIT_EVIDENCE_FILES.items()
+    }
+    if (
+        value.get("schema_version") != 1
+        or value.get("protocol_version") != 3
+        or value.get("disposition") != "READY_V3"
+        or value.get("scientific_outputs_observed") is not False
+        or value.get("test_command") != "python -m pytest -q tests"
+        or not isinstance(value.get("tests_collected"), int)
+        or value.get("tests_collected", 0) < 1
+        or not isinstance(value.get("tests_passed"), int)
+        or value.get("tests_passed") != value.get("tests_collected")
+        or not isinstance(value.get("test_output_sha256"), str)
+        or len(value.get("test_output_sha256", "")) != 64
+        or value.get("required_validations") != sorted(REQUIRED_VALIDATIONS)
+        or value.get("audits")
+        != {lens: record["disposition"] for lens, record in audit_evidence.items()}
+        or value.get("audit_evidence_sha256s") != expected_audit_hashes
+        or value.get("failed_stream") != expected_failure
+        or value.get("subject_sha256s") != expected_hashes
+    ):
+        raise ValueError("audit readiness attestation mismatch")
+    if "Disposition: `READY_V3`" not in (root / "AUDIT.md").read_text():
+        raise ValueError("human audit disposition is not READY_V3")
+    return value
 
 
 def evaluation_root(commit_sha: str) -> int:
@@ -72,15 +274,20 @@ def derive_seed(commit_sha: str, label: str) -> int:
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big", signed=False)
 
 
-def clean_head(repo: str | Path) -> str:
+def current_head(repo: str | Path) -> str:
     repo = Path(repo)
-    head = subprocess.run(
+    return subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repo,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+def clean_head(repo: str | Path) -> str:
+    repo = Path(repo)
+    head = current_head(repo)
     dirty = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=repo,
@@ -150,6 +357,12 @@ def verify_runtime(repo: str | Path | None = None) -> dict:
         "scipy": importlib.metadata.version("scipy"),
         "scikit-learn": importlib.metadata.version("scikit-learn"),
         "torch": importlib.metadata.version("torch"),
+        "backend": "cpu",
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "torch_num_threads_locked": torch.get_num_threads(),
+        "torch_num_interop_threads_locked": torch.get_num_interop_threads(),
+        "torch_float32_matmul_precision": torch.get_float32_matmul_precision(),
+        "torch_mha_fastpath_enabled": torch.backends.mha.get_fastpath_enabled(),
     }
     for key, observed in actual.items():
         if str(expected.get(key)) != str(observed):
@@ -166,6 +379,12 @@ def verify_runtime(repo: str | Path | None = None) -> dict:
     ):
         raise RuntimeError("Python executable does not match the installed-runtime lock")
     distributions = installed.get("distributions", {})
+    module_names = {
+        "numpy": "numpy",
+        "scipy": "scipy",
+        "scikit-learn": "sklearn",
+        "torch": "torch",
+    }
     for name in ("numpy", "scipy", "scikit-learn", "torch"):
         record = distributions.get(name, {})
         distribution = importlib.metadata.distribution(name)
@@ -179,7 +398,85 @@ def verify_runtime(repo: str | Path | None = None) -> dict:
             or sha256_file(record_path) != record.get("record_sha256")
         ):
             raise RuntimeError(f"installed distribution record mismatch: {name}")
+        verified_paths = _verify_distribution_payloads(
+            distribution, record_path, name, record
+        )
+        module = importlib.import_module(module_names[name])
+        module_path = Path(str(getattr(module, "__file__", ""))).resolve()
+        if module_path not in verified_paths:
+            raise RuntimeError(f"imported module origin is outside locked distribution: {name}")
     return actual
+
+
+def _verify_distribution_payloads(
+    distribution, record_path: Path, name: str, locked_record: dict
+) -> set[Path]:
+    verified = set()
+    payload_entries = []
+    payload_bytes = 0
+    with record_path.open(newline="") as handle:
+        rows = list(csv.reader(handle))
+    for row in rows:
+        if len(row) != 3 or not row[0]:
+            raise RuntimeError(f"malformed installed distribution RECORD: {name}")
+        relative, encoded_digest, encoded_size = row
+        path = Path(distribution.locate_file(relative)).resolve()
+        if not path.is_file():
+            raise RuntimeError(f"installed distribution payload missing: {name}:{relative}")
+        relative_path = Path(relative)
+        mutable_cache = "__pycache__" in relative_path.parts or relative_path.suffix == ".pyc"
+        if mutable_cache:
+            continue
+        if encoded_size:
+            try:
+                expected_size = int(encoded_size)
+            except ValueError as error:
+                raise RuntimeError(
+                    f"malformed installed distribution size: {name}:{relative}"
+                ) from error
+            if path.stat().st_size != expected_size:
+                raise RuntimeError(f"installed distribution size mismatch: {name}:{relative}")
+        with path.open("rb") as payload:
+            actual_digest = hashlib.file_digest(payload, "sha256").digest()
+        if encoded_digest:
+            try:
+                algorithm, encoded = encoded_digest.split("=", 1)
+            except ValueError as error:
+                raise RuntimeError(
+                    f"malformed installed distribution digest: {name}:{relative}"
+                ) from error
+            if algorithm != "sha256":
+                raise RuntimeError(
+                    f"unsupported installed distribution digest: {name}:{relative}"
+                )
+            expected_digest = base64.urlsafe_b64decode(encoded + "==")
+            if actual_digest != expected_digest:
+                raise RuntimeError(
+                    f"installed distribution payload mismatch: {name}:{relative}"
+                )
+        payload_entries.append(
+            {
+                "path": relative,
+                "size": path.stat().st_size,
+                "sha256": actual_digest.hex(),
+            }
+        )
+        payload_bytes += path.stat().st_size
+        verified.add(path)
+    if record_path.resolve() not in verified:
+        raise RuntimeError(f"installed distribution RECORD is not self-listed: {name}")
+    tree_digest = hashlib.sha256()
+    for entry in sorted(payload_entries, key=lambda value: value["path"]):
+        tree_digest.update(
+            (json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        )
+    if (
+        locked_record.get("payload_files") != len(payload_entries)
+        or locked_record.get("payload_bytes") != payload_bytes
+        or locked_record.get("payload_tree_sha256") != tree_digest.hexdigest()
+    ):
+        raise RuntimeError(f"installed distribution payload tree mismatch: {name}")
+    return verified
 
 
 def _require_pair(values, name: str) -> tuple[float, float]:
@@ -208,12 +505,21 @@ def validate_locked_validations(
             raise ValueError(f"required validation did not pass: {relative}")
         values[relative] = value
 
+    expected_implementation_hashes = package_source_hashes()
+    expected_input_hashes = validation_input_hashes()
+    load_checkpoint_registry(root / "config" / "checkpoint_registry.json")
+    for relative, value in values.items():
+        if value.get("input_sha256s") != expected_input_hashes:
+            raise ValueError(f"validation input hash mismatch: {relative}")
+
     for index, role in enumerate(("primary", "sensitivity")):
         instrument = values[f"artifacts/validation/instrument_{role}.json"]
         if instrument.get("producer_sha256") != sha256_file(
             root / "src" / "pfn_dag_verify" / "validation.py"
         ):
             raise ValueError(f"instrument producer hash mismatch: {role}")
+        if instrument.get("implementation_sha256s") != expected_implementation_hashes:
+            raise ValueError(f"instrument implementation hash mismatch: {role}")
         if instrument.get("bank_role") != role:
             raise ValueError(f"instrument validation role mismatch: {role}")
         if instrument.get("quadrature") != 15 or instrument.get("unit_contexts") != 64:
@@ -259,10 +565,15 @@ def validate_locked_validations(
             root / "src" / "pfn_dag_verify" / "legacy_compare.py"
         ):
             raise ValueError(f"legacy producer hash mismatch: {role}")
+        if legacy.get("implementation_sha256s") != expected_implementation_hashes:
+            raise ValueError(f"legacy implementation hash mismatch: {role}")
         if legacy.get("bank_role") != role or legacy.get("n_contexts") != 8:
             raise ValueError(f"legacy validation scope mismatch: {role}")
         np.testing.assert_array_equal(np.asarray(legacy.get("queries")), banks[index])
-        legacy_path = root / str(legacy.get("legacy_file"))
+        expected_legacy_label = "artifacts/legacy/stage1_functional_law.py"
+        if legacy.get("legacy_file") != expected_legacy_label:
+            raise ValueError(f"legacy source path mismatch: {role}")
+        legacy_path = root / expected_legacy_label
         if not legacy_path.is_file() or sha256_file(legacy_path) != legacy.get("legacy_sha256"):
             raise ValueError(f"legacy source snapshot mismatch: {role}")
         legacy_errors = np.asarray(
@@ -286,6 +597,8 @@ def validate_locked_validations(
         root / "src" / "pfn_dag_verify" / "validation.py"
     ):
         raise ValueError("bootstrap producer hash mismatch")
+    if coverage.get("implementation_sha256s") != expected_implementation_hashes:
+        raise ValueError("bootstrap implementation hash mismatch")
     if (
         coverage.get("datasets_per_slope") != 500
         or coverage.get("bootstraps_per_dataset") != 1000
@@ -310,11 +623,125 @@ def validate_locked_validations(
     if coverage.get("pass") is not coverage_pass or not coverage_pass:
         raise ValueError("bootstrap numeric thresholds failed")
 
+    batch_shape = values["artifacts/validation/batch_shape.json"]
+    if batch_shape.get("producer_sha256") != sha256_file(
+        root / "src" / "pfn_dag_verify" / "validation.py"
+    ):
+        raise ValueError("batch-shape producer hash mismatch")
+    if batch_shape.get("implementation_sha256s") != expected_implementation_hashes:
+        raise ValueError("batch-shape implementation hash mismatch")
+    expected_batch_shape = {
+        "validation_kind": "fixed-production-shape-v2",
+        "validation_seed": 860003,
+        "companion_seed": 860004,
+        "batch_permutation_seed": 860005,
+        "row_permutation_seeds": {"core20": 860006, "length30": 860007},
+        "contexts_per_kind": 64,
+        "context_kinds": ["core20", "length30"],
+        "context_rows": {"core20": 20, "length30": 30},
+        "production_batch_size": 64,
+        "identities_checked": 32,
+        "banks_checked": 2,
+        "registry_sha256": sha256_file(root / "config" / "checkpoint_registry.json"),
+    }
+    for key, expected in expected_batch_shape.items():
+        if batch_shape.get(key) != expected:
+            raise ValueError(f"batch-shape validation scope mismatch: {key}")
+    np.testing.assert_array_equal(np.asarray(batch_shape.get("query_banks")), banks)
+    bank_hash = hashlib.sha256(np.ascontiguousarray(banks).tobytes()).hexdigest()
+    if batch_shape.get("query_banks_sha256") != bank_hash:
+        raise ValueError("batch-shape query-bank hash mismatch")
+    for key in ("sample_sha256s", "companion_sample_sha256s"):
+        digests = batch_shape.get(key, {})
+        if set(digests) != {"core20", "length30"}:
+            raise ValueError(f"batch-shape context hashes incomplete: {key}")
+        for digest in digests.values():
+            if len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise ValueError(f"batch-shape context hash malformed: {key}")
+    records = batch_shape.get("records", [])
+    registry_value = json.loads((root / "config" / "checkpoint_registry.json").read_text())
+    checkpoint_hashes = {
+        (int(record["seed"]), int(record["step"])): record["sha256"]
+        for record in registry_value["checkpoints"]
+    }
+    expected_identities = {
+        (seed, step, bank, context_kind)
+        for seed in range(16)
+        for step in (0, 12_000)
+        for bank in (0, 1)
+        for context_kind in ("core20", "length30")
+    }
+    observed_identities = {
+        (
+            record.get("seed"),
+            record.get("step"),
+            record.get("bank_index"),
+            record.get("context_kind"),
+        )
+        for record in records
+    }
+    record_pass = bool(
+        len(records) == 128
+        and observed_identities == expected_identities
+        and all(
+            record.get("pass") is True
+            and record.get("production_replay_byte_identical") is True
+            and record.get("batch_axis_permutation_byte_identical") is True
+            and record.get("companion_replacement_byte_identical") is True
+            and record.get("checkpoint_sha256")
+            == checkpoint_hashes.get((record.get("seed"), record.get("step")))
+            and float(record.get("max_batch_axis_permutation_error", np.inf)) == 0.0
+            and float(record.get("max_companion_replacement_error", np.inf)) == 0.0
+            and 0.0 <= float(record.get("max_row_permutation_error", np.inf)) <= 1e-6
+            and 0.0
+            <= float(record.get("descriptive_max_batch_1_vs_64_error", np.inf))
+            < np.inf
+            and record.get("focal_contexts_checked") == 64
+            and record.get("companion_variants") == 16
+            and record.get("companion_group_max_errors") == [0.0] * 16
+            and record.get("context_kind") in ("core20", "length30")
+            for record in records
+        )
+    )
+    record_maxima = {
+        "max_batch_axis_permutation_error": max(
+            float(record["max_batch_axis_permutation_error"]) for record in records
+        ),
+        "max_companion_replacement_error": max(
+            float(record["max_companion_replacement_error"]) for record in records
+        ),
+        "max_row_permutation_error": max(
+            float(record["max_row_permutation_error"]) for record in records
+        ),
+        "descriptive_max_batch_1_vs_64_error": max(
+            float(record["descriptive_max_batch_1_vs_64_error"]) for record in records
+        ),
+    } if records else {}
+    aggregate_pass = bool(
+        batch_shape.get("production_replay_byte_identical") is True
+        and batch_shape.get("batch_axis_permutation_byte_identical") is True
+        and batch_shape.get("companion_replacement_byte_identical") is True
+        and float(batch_shape.get("max_batch_axis_permutation_error", np.inf)) == 0.0
+        and float(batch_shape.get("max_companion_replacement_error", np.inf)) == 0.0
+        and 0.0 <= float(batch_shape.get("max_row_permutation_error", np.inf)) <= 1e-6
+        and 0.0
+        <= float(batch_shape.get("descriptive_max_batch_1_vs_64_error", np.inf))
+        < np.inf
+        and all(batch_shape.get(key) == value for key, value in record_maxima.items())
+    )
+    batch_shape_pass = bool(record_pass and aggregate_pass)
+    if batch_shape.get("pass") is not batch_shape_pass or not batch_shape_pass:
+        raise ValueError("batch-shape numeric thresholds failed")
+
     smoke = values["artifacts/validation/smoke_budget.json"]
     if smoke.get("producer_sha256") != sha256_file(
         root / "src" / "pfn_dag_verify" / "smoke.py"
     ):
         raise ValueError("smoke producer hash mismatch")
+    if smoke.get("implementation_sha256s") != expected_implementation_hashes:
+        raise ValueError("smoke implementation hash mismatch")
     expected_smoke = {
         "smoke_kind": "interior-selected-end-to-end-v3",
         "smoke_stream_label": "smoke-v3",
@@ -323,6 +750,9 @@ def validate_locked_validations(
         "max_core_candidates": 2000,
         "max_blocks_per_core": 512,
         "min_within_group_sd": 0.25,
+        "guard_records": 4,
+        "guard_sample_source": "dedicated-deterministic-smoke",
+        "projected_scientific_guard_records": 128,
         "wall_cap_seconds": WALL_CAP_SECONDS,
         "memory_cap_bytes": MEMORY_CAP_BYTES,
         "raw_cap_bytes": RAW_CAP_BYTES,
@@ -331,9 +761,20 @@ def validate_locked_validations(
         if smoke.get(key) != expected:
             raise ValueError(f"smoke-budget scope mismatch: {key}")
     enforce_cost_gate(smoke)
+    multipliers = smoke.get("projection_multipliers", {})
+    components = smoke.get("components", {})
     smoke_pass = bool(
         smoke.get("eligible_replace_rows") == 64
         and smoke.get("prediction_shards") == 4
+        and multipliers
+        == {
+            "group_ratio": 32.0,
+            "shard_ratio": 16.0,
+            "guard_ratio": 32.0,
+            "safety_factor": 1.25,
+        }
+        and float(components.get("guard_wall_seconds", -1.0)) > 0.0
+        and float(components.get("non_guard_score_wall_seconds", -1.0)) > 0.0
         and float(smoke["projected_wall_seconds"]) <= WALL_CAP_SECONDS
         and int(smoke["projected_peak_rss_bytes"]) <= MEMORY_CAP_BYTES
         and int(smoke["projected_raw_bytes"]) <= RAW_CAP_BYTES
@@ -343,18 +784,122 @@ def validate_locked_validations(
     return values
 
 
+def recompute_smoke_projections(smoke: dict) -> tuple[float, int, int]:
+    multipliers = smoke.get("projection_multipliers", {})
+    components = smoke.get("components", {})
+    required_multipliers = ("group_ratio", "shard_ratio", "guard_ratio", "safety_factor")
+    required_components = (
+        "panel_wall_seconds",
+        "score_wall_seconds",
+        "guard_wall_seconds",
+        "non_guard_score_wall_seconds",
+        "derive_wall_seconds",
+        "panel_bytes",
+        "prediction_shard_bytes",
+        "prediction_metadata_bytes",
+        "prediction_bytes",
+        "derived_bytes",
+        "replay_bundle_bytes",
+        "tracked_repository_bytes",
+        "measured_peak_rss_bytes",
+    )
+    try:
+        numeric_multipliers = {
+            key: float(multipliers[key]) for key in required_multipliers
+        }
+        numeric_components = {
+            key: float(components[key]) for key in required_components
+        }
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("BLOCKED_COST: incomplete projection components") from error
+    if not all(
+        np.isfinite(value) and value > 0 for value in numeric_multipliers.values()
+    ) or not all(
+        np.isfinite(value) and value >= 0 for value in numeric_components.values()
+    ):
+        raise RuntimeError("BLOCKED_COST: non-finite or negative projection components")
+    if (
+        numeric_components["guard_wall_seconds"] <= 0
+        or numeric_components["non_guard_score_wall_seconds"] <= 0
+        or not np.isclose(
+            numeric_components["score_wall_seconds"],
+            numeric_components["guard_wall_seconds"]
+            + numeric_components["non_guard_score_wall_seconds"],
+            rtol=1e-12,
+            atol=1e-9,
+        )
+        or int(numeric_components["prediction_bytes"])
+        != int(numeric_components["prediction_shard_bytes"])
+        + int(numeric_components["prediction_metadata_bytes"])
+    ):
+        raise RuntimeError("BLOCKED_COST: inconsistent measured timing or byte components")
+    group_ratio = numeric_multipliers["group_ratio"]
+    shard_ratio = numeric_multipliers["shard_ratio"]
+    guard_ratio = numeric_multipliers["guard_ratio"]
+    safety = numeric_multipliers["safety_factor"]
+    inference_ratio = group_ratio * shard_ratio
+    projected_wall = safety * (
+        numeric_components["panel_wall_seconds"] * group_ratio
+        + numeric_components["guard_wall_seconds"] * guard_ratio
+        + numeric_components["non_guard_score_wall_seconds"] * inference_ratio
+        + numeric_components["derive_wall_seconds"] * inference_ratio
+    )
+    projected_raw = int(
+        safety
+        * (
+            numeric_components["panel_bytes"] * group_ratio
+            + numeric_components["prediction_shard_bytes"] * inference_ratio
+            + numeric_components["prediction_metadata_bytes"] * guard_ratio
+            + numeric_components["derived_bytes"] * inference_ratio
+            + numeric_components["replay_bundle_bytes"]
+            + numeric_components["tracked_repository_bytes"]
+            + 10 * 2**20
+        )
+    )
+    projected_peak = int(
+        max(
+            numeric_components["measured_peak_rss_bytes"] * 4,
+            numeric_components["panel_bytes"] * group_ratio * 3,
+            512 * 2**20,
+        )
+    )
+    return projected_wall, projected_peak, projected_raw
+
+
 def enforce_cost_gate(smoke: dict) -> None:
     projected = (
         float(smoke.get("projected_wall_seconds", float("inf"))),
         int(smoke.get("projected_peak_rss_bytes", MEMORY_CAP_BYTES + 1)),
         int(smoke.get("projected_raw_bytes", RAW_CAP_BYTES + 1)),
     )
-    if not np.isfinite(projected[0]) or projected[0] > WALL_CAP_SECONDS:
+    recomputed = recompute_smoke_projections(smoke)
+    if (
+        not np.isfinite(projected[0])
+        or projected[0] < 0
+        or not np.isclose(projected[0], recomputed[0], rtol=1e-12, atol=1e-9)
+        or projected[1] < 0
+        or projected[1] != recomputed[1]
+        or projected[2] < 0
+        or projected[2] != recomputed[2]
+    ):
+        raise RuntimeError("BLOCKED_COST: reported projection does not match components")
+    if projected[0] > WALL_CAP_SECONDS:
         raise RuntimeError("BLOCKED_COST: projected wall-clock limit exceeded")
     if projected[1] > MEMORY_CAP_BYTES:
         raise RuntimeError("BLOCKED_COST: projected memory limit exceeded")
     if projected[2] > RAW_CAP_BYTES:
         raise RuntimeError("BLOCKED_COST: projected raw-storage limit exceeded")
+
+
+def validate_run_lock_metadata(lock: dict) -> None:
+    if set(lock) != RUN_LOCK_KEYS or lock.get("schema_version") != 1:
+        raise ValueError("run lock has an unexpected top-level schema")
+    if lock.get("required_validations") != sorted(REQUIRED_VALIDATIONS):
+        raise ValueError("run lock does not name the exact required validation set")
+    if lock.get("settings") != RUN_LOCK_SETTINGS:
+        raise ValueError("run-lock settings differ from the scientific specification")
+    if lock.get("claim_scope") != RUN_LOCK_CLAIM_SCOPE:
+        raise ValueError("run-lock claim scope differs from the scientific specification")
 
 
 def verify_run_lock(repo: str | Path | None = None) -> tuple[str, str, dict]:
@@ -363,6 +908,7 @@ def verify_run_lock(repo: str | Path | None = None) -> tuple[str, str, dict]:
         raise ValueError("scientific stages must use the repository containing the package")
     head = clean_head(root)
     lock_path, lock = load_run_lock(root)
+    validate_run_lock_metadata(lock)
     files = lock.get("files")
     if not isinstance(files, dict) or not files:
         raise ValueError("run lock has no file manifest")
@@ -373,26 +919,10 @@ def verify_run_lock(repo: str | Path | None = None) -> tuple[str, str, dict]:
         path = root / relative
         if not path.is_file() or sha256_file(path) != expected_hash:
             raise ValueError(f"run-lock file mismatch: {relative}")
-    if set(lock.get("required_validations", [])) != REQUIRED_VALIDATIONS:
-        raise ValueError("run lock does not name the exact required validation set")
-    settings = lock.get("settings", {})
-    expected_settings = {
-        "groups": 256,
-        "continuations": 8,
-        "max_core_candidates": 2000,
-        "max_blocks_per_core": 512,
-        "min_within_group_sd": 0.25,
-        "bootstrap_replicates": 10000,
-        "permutation_replicates": 2000,
-        "interval_quantiles": [0.02, 0.98],
-        "model_batch_size": 64,
-        "smoke_stream": {"label": "smoke-v3", "groups": 8, "continuations": 8},
-    }
-    if settings != expected_settings:
-        raise ValueError("run-lock settings differ from the scientific specification")
     load_locked_query_banks(root)
     verify_runtime(root)
     validate_locked_validations(root)
+    validate_audit_readiness(root)
     return head, sha256_file(lock_path), lock
 
 

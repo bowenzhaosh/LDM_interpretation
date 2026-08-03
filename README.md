@@ -23,7 +23,7 @@ Inference uses a within-core slope and a crossed model-seed by core bootstrap. B
 - exact scalar fixtures and fail-closed regression tests under `tests/`;
 - 32 content-addressed base AL40 checkpoints under `artifacts/checkpoints/`;
 - four original training-code snapshots and the legacy Stage-1 oracle snapshot;
-- frozen query-bank calibration metadata, both-bank validation records, and a measured selected-interior cost smoke;
+- frozen query-bank calibration metadata, both-bank validation records, a full-fleet fixed-production-shape validation, and a measured selected-interior cost smoke;
 - platform and installed-distribution fingerprints for the local macOS arm64 scientific runtime.
 
 Checkpoint provenance is limited. The file hashes are exact and portable within this repository, but the complete online training-stream lineage was not available. Claims therefore apply to these files only.
@@ -50,16 +50,20 @@ python -m pfn_dag_verify.validation instrument --query-bank config/query_bank.js
 STAGE1_SRC=artifacts/source_snapshots python -m pfn_dag_verify.legacy_compare --legacy-file artifacts/legacy/stage1_functional_law.py --query-bank config/query_bank.json --bank primary --out artifacts/validation/legacy_oracle_primary.json
 STAGE1_SRC=artifacts/source_snapshots python -m pfn_dag_verify.legacy_compare --legacy-file artifacts/legacy/stage1_functional_law.py --query-bank config/query_bank.json --bank sensitivity --out artifacts/validation/legacy_oracle_sensitivity.json
 python -m pfn_dag_verify.validation coverage --datasets-per-slope 500 --bootstraps 1000 --out artifacts/validation/bootstrap_coverage.json
+python -m pfn_dag_verify.validation batch-shape --query-bank config/query_bank.json --registry config/checkpoint_registry.json --out artifacts/validation/batch_shape.json
 python -m pfn_dag_verify.smoke --out artifacts/validation/smoke_budget.json
+python -m pytest -q
+# After AUDIT.md records all five dispositions as READY_V3
+python -m pfn_dag_verify.readiness_builder
 python -m pfn_dag_verify.run_lock_builder
 ```
 
-The run lock hashes the plan, harness, query bank, checkpoint registry, runtime records, and all six required validation files. Commit the resulting tree before scientific evaluation. Every scientific stage rejects a dirty tree or a run-lock mismatch.
+The readiness builder removes caller-supplied pytest selectors, collects the explicit `tests/` tree, requires every collected test to pass, and binds the output hash. The runtime check verifies the Python binary, imported package origins, and every non-cache payload listed by the locked NumPy, SciPy, scikit-learn, and PyTorch distributions. The run lock hashes the plan, harness, query bank, checkpoint registry, runtime records, all seven required validation files, per-lens audit evidence, and the machine-readable `READY_V3` attestation. Commit the resulting tree before scientific evaluation. Every scientific stage rejects a dirty tree or a run-lock mismatch.
 
 ## Execute the scientific run
 
 ```bash
-RUN="runs/scientific-$(git rev-parse --short HEAD)"
+RUN="runs/scientific-$(git rev-parse --short=7 HEAD)"
 mkdir -p "$RUN"
 python -m pfn_dag_verify.evaluation panel --out "$RUN/panel.npz"
 python -m pfn_dag_verify.evaluation score --panel "$RUN/panel.npz" --out "$RUN/predictions"
@@ -68,8 +72,8 @@ python -m pfn_dag_verify.seal --run-dir "$RUN"
 python -m pfn_dag_verify.analysis summarize --run-dir "$RUN"
 ```
 
-Scoring writes no scientific estimates. The summary can be computed only after all 64 prediction shards and all 64 derived shards pass semantic checks and the replay tree is sealed. A stale panel, checkpoint, query bank, shard, ledger, validation record, runtime, or commit causes a nonzero exit.
+Scoring first writes `pre_score_guard.json`, which records all full-fleet production-shape checks even when a guard fails. It writes no scientific estimates. `score_progress.json` begins with that persisted guard cost, and it and `derive_progress.json` accumulate resource use across safely resumed shard attempts. The canonical summary can be computed only after all 64 prediction shards and all 64 derived shards pass semantic checks and the replay tree is sealed. The sealed tar includes an exact-commit Git bundle and Gitless restoration instructions. Restored archives use the separate `analysis replay` command, which writes a noncanonical replay summary and cannot issue `LOCALLY_VERIFIED`. The smoke storage projection includes the measured Git bundle and tracked repository tree; final sealing enforces the actual tar-file size. A stale panel, checkpoint, query bank, shard, ledger, validation record, runtime, archive, or commit causes a nonzero exit.
 
 ## Result status
 
-The pre-run artifacts are locally verified. The final scientific claim ledger and raw replay bundle are added only after the preregistered one-shot run completes. External publication or a GitHub push is not performed automatically.
+The version-2 stream at commit `d0b049d` stopped at its pre-score batch guard and produced no prediction shard or scientific verdict. Version 3 requires a new commit-derived stream. The final scientific claim ledger and raw replay bundle are added only after that one-shot run completes. External publication or a GitHub push is not performed automatically.

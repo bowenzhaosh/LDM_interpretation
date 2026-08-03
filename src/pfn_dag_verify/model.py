@@ -42,6 +42,8 @@ class PFNModel(nn.Module):
 def configure_determinism(seed: int = 0) -> None:
     torch.manual_seed(int(seed))
     torch.use_deterministic_algorithms(True)
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.mha.set_fastpath_enabled(True)
     torch.set_num_threads(1)
     try:
         torch.set_num_interop_threads(1)

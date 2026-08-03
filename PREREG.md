@@ -1,8 +1,8 @@
-# PFN-DAG essential verification plan, version 2
+# PFN-DAG essential verification plan, version 3
 
 Date locked: 2026-08-03
 
-Status: design artifact. No held-out scientific output may be read until the harness, query bank, checkpoint registry, and this plan are committed together.
+Status: amended design artifact. The version-2 scientific stream stopped at a pre-score guard before any prediction shard or scientific metric existed. Version 3 must be committed with a new run lock before a fresh commit-derived panel is generated.
 
 ## 1. Questions and licensed claims
 
@@ -38,6 +38,7 @@ Calibration, unit, smoke, statistical simulation, and scientific evaluation stre
 - Query-bank calibration stream: fixed label `calibration-v2`; 512 natural contexts. It selects queries but never supplies a scientific row.
 - Smoke stream: fixed label `smoke-v3`; 8 selected-interior groups by 8 continuations, both banks, and both checkpoint steps for one model seed. It may test runtime and schemas only.
 - Statistical validation stream: fixed label `coverage-v2`; synthetic outcomes only.
+- Production-shape validation stream: fixed seeds `860003` through `860007`; 64 length-20 core contexts, 64 length-30 contexts, and matched companion banks. It checks all 32 checkpoints and both query banks but never supplies a scientific row.
 - Evaluation stream: derived only after the audited code, plan, resolved query bank, environment lock, and checkpoint registry are committed.
 
 The evaluation root seed is the first 64 bits of `SHA256(commit_sha || "pfn-dag-essential-evaluation-v2")`. Child streams are derived by hashing the root with explicit labels for group, continuation, bootstrap, and permutation. The runner aborts if the worktree is dirty or the committed plan, registry, query bank, or code hashes differ.
@@ -72,7 +73,7 @@ Selection fails if fewer than 50 percent of calibration contexts reach JS `0.1`.
 All assertions must pass before any scientific checkpoint is loaded.
 
 1. Shapes, dtypes, normalization, covariance validity, finite values, and query-axis preservation.
-2. Repeated calls at the production batch size are byte-identical. Every one of the 32 frozen checkpoints is checked on both query banks. Real-checkpoint batch sizes 1 and 64 agree within `1e-6` on CPU; fleet calibration found a maximum difference of approximately `8.1e-7`, so the earlier `1e-7` proposal was not runnable. Scientific inference fixes batch size at 64.
+2. Scientific inference fixes physical batch size at 64, and every scientific inference array must contain only complete batches. Commit-derived uniform samples of 64 length-20 cores and 64 length-30 targets are drawn without replacement across the full panel. On every one of the 32 checkpoints and both query banks, repeated batch-64 calls must be byte-identical. Permuting the batch axis and restoring it must be byte-identical. Every focal context in each length class must be byte-identical when the other 60 contexts are replaced at the same physical batch shape; 16 complementary batches cover four focal contexts each. Batch-1 versus batch-64 error is recorded descriptively and has no pass threshold because singleton inference is not part of the estimand. Context-row permutations remain subject to item 8.
 3. Exact Bayes fixtures recover slope 1 and intercept 0; tempered fixtures recover `0.25`, `0.5`, and `0.75` within `0.02`.
 4. Held-out planted weights `{0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95}` have coordinate max error `1e-4`, KL max error `1e-3`, coordinate/KL log-odds median disagreement at most `0.01`, and 95th percentile at most `0.05`.
 5. Mean-pooling fixture has high free-slope fit and slope near `0.5`, demonstrating that free-slope R-squared is non-diagnostic.
@@ -177,23 +178,35 @@ The append and step-0 comparisons receive estimates and 95 percent intervals but
 
 Every group shard is written atomically and incrementally. Raw artifacts include every accepted and rejected core and block candidate, candidate ordinal and child seed, rejection reason, contexts, graph label, covariance and SEM parameters, all exact evidence values, both query banks, both endpoint arrays, every checkpoint probability tensor, coordinate and KL fits, unclipped weights, residuals, eligibility masks, checkpoint registry, resolved config, logs, environment fingerprint, git revision, and seed derivation record. NPZ files use numeric arrays only and disallow pickle.
 
-Finalization verifies every shard, writes file-level SHA-256 values, computes one content-tree hash, and creates a content-addressed archive with all raw material needed to recompute the summary. Compact code, plan, registry, hashes, and summary are committed locally. Publication of checkpoints and the raw archive to a durable external URI is a separate outward-facing action requiring user authorization. Until that happens, the status is `LOCALLY_VERIFIED`, never `INDEPENDENTLY_REPRODUCIBLE`.
+After the panel commit is decoded, rejected-stream denylist is checked, and the lexical commit-named path is verified, a `RUNNING` pre-score record is written before run-lock, registry, or checkpoint validation can abort. Normal completion replaces it with the full record. Any Python exception during that gate replaces it with an `ERROR` record before being re-raised. A failed or interrupted guard is terminal for that commit stream. A byte-identical `COMPLETE` and passing guard may support shard recovery, but it is re-adjudicated semantically and never rewritten.
+
+Scoring and derivation each maintain an atomic cumulative attempt record. The score record starts with the persisted pre-score guard wall time and peak memory before any checkpoint attempt is appended, closing the crash window between guard completion and shard scoring. Every completed checkpoint pair or derived shard, and every caught exception, updates elapsed wall time, peak memory, and validated shard identities. A resumed invocation preserves prior attempt cost, so sealing cannot pass by reporting only the final invocation. Panel metadata is producer-bound and its resource fields must be finite and nonnegative. Finalization verifies every shard and both cumulative histories, writes file-level SHA-256 values, computes one content-tree hash, and creates a content-addressed archive with all raw material needed to recompute the summary. The archive includes a Git bundle for the exact scientific commit and restoration instructions for a Gitless extraction. Canonical summarization always verifies that content-addressed archive and is the only path that may issue `LOCALLY_VERIFIED`. A Gitless extraction uses the separate `analysis replay` command, writes `replay_summary.json`, and reports `REPLAY_VERIFIED_NONCANONICAL`; it cannot bypass the canonical archive gate. Compact code, plan, registry, hashes, and summary are committed locally. Publication of checkpoints and the raw archive to a durable external URI is a separate outward-facing action requiring user authorization. Until that happens, the status is `LOCALLY_VERIFIED`, never `INDEPENDENTLY_REPRODUCIBLE`.
 
 ## 13. Measured budget and stop conditions
 
 Pre-plan measurements on this machine were approximately 11,237 oracle triplets per minute, 532 PFN contexts per second on CPU, and 1,069 contexts per second on MPS. Scientific inference uses CPU for determinism. The fixed panel requires 2,560 unique contexts per query bank and 32 checkpoints, or 163,840 model context-bank evaluations. The expected model pass is about 6 minutes before I/O and checks.
 
-Before evaluation, one end-to-end smoke batch must run the same selected-interior path with 8 accepted groups, 8 continuations, both query banks, and both checkpoint steps for one model seed. It measures wall time, peak resident memory, and compressed bytes, then extrapolates panel size and the full 64-shard fleet with a 25 percent safety factor. The scientific cap is 45 wall-clock minutes, 16 GB peak RAM, and 2 GB raw compressed storage. The run aborts with `BLOCKED_COST` before panel generation and again before unblinding if smoke extrapolation or measured resources exceed any cap. Missing checkpoints, failed guards, dirty code, hash mismatch, non-finite values, or incomplete shards stop the run immediately.
+Before evaluation, one end-to-end smoke batch must run the same selected-interior path with 8 accepted groups, 8 continuations, both query banks, and both checkpoint steps for one model seed. It measures wall time, peak resident memory, compressed bytes, the exact current-commit Git-bundle size, and the tracked repository-tree size, then extrapolates panel size and the full 64-shard fleet with a 25 percent safety factor. The scientific cap is 45 wall-clock minutes, 16 GB peak RAM, and 2 GB sealed-archive storage. Final sealing records and enforces the actual tar-file size, including the manifest, repository members, replay material, and tar overhead. The run aborts with `BLOCKED_COST` before panel generation and again before unblinding if smoke extrapolation or measured resources exceed any cap. Missing checkpoints, failed guards, dirty code, hash mismatch, non-finite values, or incomplete shards stop the run immediately.
+
+The smoke keeps its preregistered 8 by 8 selected-interior scoring panel and uses a separate deterministic 64-context bank solely to exercise both physical production shapes. Validation independently recomputes the wall, memory, and storage projections from persisted timing and byte components, including the measured replay Git bundle and duplicate tracked repository tree. Reported projections cannot certify themselves.
 
 ## 14. Execution order
 
 1. Implement assertions and decision-rule tests.
 2. Implement the independent oracle, instrument, design generator, model loader, storage, and crossed statistics.
 3. Run unit tests and structural smoke only.
-4. Complete the six-lens code audit and fix every blocker.
+4. Complete the adversarial code audit and fix every blocker.
 5. Select and commit the query bank, registry, environment, plan, and audited code.
 6. Derive the one-shot evaluation stream from that commit and generate the fixed panel.
 7. Run oracle and fixture gates. Stop if any fails.
 8. Run checkpoint scoring without printing scientific estimates.
 9. Verify and seal raw shards.
 10. Unblind once, compute the preregistered summary, and write the honest claim ledger.
+
+## 15. Version-3 amendment record
+
+The immutable version-2 commit was `d0b049d6241845e55443f4950e52b70644b2b1ab`. Its oracle-only panel completed, but scoring stopped before creating a prediction directory. The fatal gate compared batch sizes 1 and 64 at an absolute probability tolerance of `1e-6`. One of 64 checkpoint-bank records measured `1.1324882507324219e-6`, at seed 4, step 12,000, sensitivity bank. Batch-64 replay was byte-identical and the fleet context-row permutation maximum was `5.066394805908203e-7`.
+
+Forensic isolation found that batch size 1 differs while batch sizes 2, 4, 8, 16, 32, and 64 are byte-identical for the worst context. The first difference occurs in float32 `query_embed`; float64 reduces the probability discrepancy to `7.77e-16`. Replacing every companion context or moving the focal context at fixed physical batch size 64 changes its output by exactly zero. The old gate therefore tested physical-shape rounding outside the fixed-batch-64 estimand. Its cited calibration maximum was also absent from the locked validation artifacts.
+
+The failed version-2 stream remains `BLOCKED_GUARD`. It produced no model outcome and licenses no scientific conclusion. Version 3 does not widen the observed threshold or reuse that panel. It replaces the non-estimand fatal comparison with the independently seeded fixed-production-shape validation in section 3, locks live PyTorch inference settings and the installed distribution payload trees, persists the pre-score guard before any run-lock or registry abort, cumulatively accounts for resumed scoring, seals an exact-commit Git bundle, and requires a new commit-derived evaluation stream.

@@ -9,12 +9,14 @@ from pathlib import Path
 
 import numpy as np
 
+from .model import configure_determinism
 from .integrity import EXPECTED_IDENTITIES, verify_prediction_ledger
 from .provenance import (
     MEMORY_CAP_BYTES,
     RAW_CAP_BYTES,
     WALL_CAP_SECONDS,
     repository_root,
+    require_scientific_run_path,
     verify_panel_lock,
     verify_run_lock,
 )
@@ -56,7 +58,61 @@ def _entry_source(entry: dict, *, root: Path, run_dir: Path) -> Path:
         return (root / entry["path"]).resolve()
     if entry["scope"] == "run":
         return _safe_run_path(run_dir, entry["path"])
+    if entry["scope"] == "replay":
+        return _safe_run_path(run_dir, f"replay/{entry['path']}")
     raise ValueError("unknown archive entry scope")
+
+
+def _verify_git_bundle(bundle_path: Path, *, root: Path, commit: str) -> None:
+    subprocess.run(
+        ["git", "bundle", "verify", str(bundle_path)],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    heads = subprocess.run(
+        ["git", "bundle", "list-heads", str(bundle_path)],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    if not any(line.split()[0] == commit for line in heads if line.split()):
+        raise ValueError("replay Git bundle does not contain the scientific commit")
+
+
+def _create_replay_material(root: Path, run_dir: Path, commit: str) -> list[str]:
+    replay_dir = run_dir / "replay"
+    if replay_dir.exists():
+        raise FileExistsError("replay material already exists")
+    replay_dir.mkdir()
+    bundle_path = replay_dir / "source.bundle"
+    subprocess.run(
+        ["git", "bundle", "create", str(bundle_path), "HEAD"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _verify_git_bundle(bundle_path, root=root, commit=commit)
+    run_name = run_dir.name
+    instructions = (
+        "PFN-DAG sealed replay\n\n"
+        "This recomputation is noncanonical: it writes replay_summary.json with "
+        "status REPLAY_VERIFIED_NONCANONICAL and cannot issue LOCALLY_VERIFIED.\n\n"
+        "From the extracted archive directory, run:\n\n"
+        "  git clone replay/source.bundle restored\n"
+        f"  mkdir -p restored/runs/{run_name}\n"
+        f"  cp -R run/. restored/runs/{run_name}/\n"
+        f"  cp -R replay restored/runs/{run_name}/replay\n"
+        f"  cp sealed_manifest.json restored/runs/{run_name}/sealed_manifest.json\n"
+        "  cd restored\n"
+        f"  PYTHONPATH=src python -m pfn_dag_verify.analysis replay --run-dir runs/{run_name}\n\n"
+        f"Expected Git commit: {commit}\n"
+    )
+    (replay_dir / "README.txt").write_text(instructions)
+    return ["README.txt", "source.bundle"]
 
 
 def _create_archive(
@@ -102,6 +158,25 @@ def _create_archive(
     return archive_path
 
 
+def _write_manifest_and_archive(
+    *, manifest_path: Path, manifest: dict, entries: list[dict], root: Path, run_dir: Path
+) -> Path:
+    """Converge the manifest's raw-byte total to the actual tar-file size."""
+    for _ in range(4):
+        write_json_atomic(manifest_path, manifest)
+        archive_path = _create_archive(
+            manifest_path=manifest_path,
+            entries=entries,
+            root=root,
+            run_dir=run_dir,
+        )
+        actual_bytes = archive_path.stat().st_size
+        if int(manifest["resource_totals"]["raw_bytes"]) == actual_bytes:
+            return archive_path
+        manifest["resource_totals"]["raw_bytes"] = actual_bytes
+    raise RuntimeError("sealed archive size did not converge")
+
+
 def _verify_archive(
     *, archive_path: Path, manifest_path: Path, entries: list[dict]
 ) -> None:
@@ -134,8 +209,13 @@ def _run_files(run_dir: Path) -> tuple[list[str], dict, dict]:
         panel_path=panel_path, prediction_dir=prediction_dir
     )
     verify_panel_lock(panel)
-    derived_ledger_path = derived_dir / "derived_ledger.json"
-    derived_ledger = json.loads(derived_ledger_path.read_text())
+    from .analysis import verify_derived_ledger
+
+    _, derived_ledger, _ = verify_derived_ledger(
+        panel_path=panel_path,
+        prediction_dir=prediction_dir,
+        derived_dir=derived_dir,
+    )
     if (
         derived_ledger.get("schema_version") != 1
         or derived_ledger.get("scientific") is not True
@@ -168,6 +248,9 @@ def _run_files(run_dir: Path) -> tuple[list[str], dict, dict]:
     relative = [
         "panel.npz",
         "panel.json",
+        "pre_score_guard.json",
+        "score_progress.json",
+        "derive_progress.json",
         "predictions/prediction_ledger.json",
         "derived/derived_ledger.json",
     ]
@@ -175,7 +258,7 @@ def _run_files(run_dir: Path) -> tuple[list[str], dict, dict]:
         f"predictions/{record['path']}" for record in prediction_ledger["records"]
     )
     relative.extend(f"derived/{record['path']}" for record in records)
-    if len(relative) != 132 or len(set(relative)) != 132:
+    if len(relative) != 135 or len(set(relative)) != 135:
         raise AssertionError("sealed run file set is incomplete or duplicated")
     for item in relative:
         if not _safe_run_path(run_dir, item).is_file():
@@ -183,10 +266,80 @@ def _run_files(run_dir: Path) -> tuple[list[str], dict, dict]:
     return sorted(relative), prediction_ledger, derived_ledger
 
 
+def _validated_panel_resources(
+    run_dir: Path, panel: dict, *, commit: str, run_lock_hash: str
+) -> tuple[float, int]:
+    path = run_dir / "panel.json"
+    metadata = json.loads(path.read_text())
+    expected_keys = {
+        "schema_version",
+        "producer_sha256",
+        "commit_sha",
+        "n_groups",
+        "n_continuations",
+        "eligible_replace_groups",
+        "eligible_append_groups",
+        "interior_selected",
+        "scientific",
+        "run_lock_sha256",
+        "evaluation_root",
+        "candidate_core_count",
+        "candidate_block_count",
+        "panel_sha256",
+        "panel_bytes",
+        "wall_seconds",
+        "peak_rss_bytes",
+    }
+    panel_path = run_dir / "panel.npz"
+    eligible_replace_groups = int(
+        np.sum(np.sum(panel["eligible_replace"].astype(bool), axis=1) >= 4)
+    )
+    eligible_append_groups = int(
+        np.sum(np.sum(panel["eligible_append"].astype(bool), axis=1) >= 4)
+    )
+    expected_values = {
+        "schema_version": 1,
+        "producer_sha256": sha256_file(Path(__file__).with_name("evaluation.py")),
+        "commit_sha": commit,
+        "n_groups": int(panel["core"].shape[0]),
+        "n_continuations": int(panel["continuations"].shape[1]),
+        "eligible_replace_groups": eligible_replace_groups,
+        "eligible_append_groups": eligible_append_groups,
+        "interior_selected": bool(int(panel["selection_mode"]) == 1),
+        "scientific": bool(int(panel["scientific"])),
+        "run_lock_sha256": run_lock_hash,
+        "evaluation_root": int(panel["evaluation_root"]),
+        "candidate_core_count": int(len(panel["candidate_core_seed"])),
+        "candidate_block_count": int(len(panel["candidate_block_seed"])),
+        "panel_sha256": sha256_file(panel_path),
+        "panel_bytes": panel_path.stat().st_size,
+    }
+    if set(metadata) != expected_keys or any(
+        metadata.get(key) != value for key, value in expected_values.items()
+    ):
+        raise ValueError("panel metadata identity or producer mismatch")
+    try:
+        wall_seconds = float(metadata["wall_seconds"])
+        peak_rss_bytes = int(metadata["peak_rss_bytes"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("panel metadata resource fields are invalid") from error
+    if (
+        not np.isfinite(wall_seconds)
+        or wall_seconds < 0.0
+        or peak_rss_bytes < 0
+        or isinstance(metadata["peak_rss_bytes"], bool)
+        or peak_rss_bytes != metadata["peak_rss_bytes"]
+    ):
+        raise ValueError("panel metadata resources must be finite and nonnegative")
+    return wall_seconds, peak_rss_bytes
+
+
 def seal_run(run_dir: Path, out_path: Path | None = None) -> dict:
+    configure_determinism(0)
     root = repository_root()
     commit, run_lock_hash, _ = verify_run_lock(root)
     run_dir = run_dir.resolve()
+    require_scientific_run_path(run_dir, commit_sha=commit, relative=".")
     out_path = run_dir / "sealed_manifest.json" if out_path is None else out_path.resolve()
     if out_path.parent != run_dir:
         raise ValueError("sealed manifest must live at the run root")
@@ -195,13 +348,16 @@ def seal_run(run_dir: Path, out_path: Path | None = None) -> dict:
     panel_commit, _ = verify_panel_lock(panel)
     if panel_commit != commit:
         raise ValueError("sealed run commit differs from clean HEAD")
+    replay_files = _create_replay_material(root, run_dir, commit)
 
-    panel_metadata = json.loads((run_dir / "panel.json").read_text())
-    wall_seconds = float(panel_metadata["wall_seconds"])
+    panel_wall, panel_peak = _validated_panel_resources(
+        run_dir, panel, commit=commit, run_lock_hash=run_lock_hash
+    )
+    wall_seconds = panel_wall
     wall_seconds += float(prediction_ledger["wall_seconds"])
     wall_seconds += float(derived_ledger["wall_seconds"])
     peak_rss_bytes = max(
-        int(panel_metadata["peak_rss_bytes"]),
+        panel_peak,
         int(prediction_ledger["peak_rss_bytes"]),
         int(derived_ledger.get("peak_rss_bytes", 0)),
     )
@@ -229,13 +385,23 @@ def seal_run(run_dir: Path, out_path: Path | None = None) -> dict:
                 "sha256": sha256_file(path),
             }
         )
+    for relative in replay_files:
+        path = _safe_run_path(run_dir, f"replay/{relative}")
+        entries.append(
+            {
+                "scope": "replay",
+                "path": relative,
+                "size": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+        )
     entries.sort(key=lambda value: (value["scope"], value["path"]))
-    raw_bytes = sum(entry["size"] for entry in entries if entry["scope"] == "run")
+    member_bytes = sum(entry["size"] for entry in entries)
     if wall_seconds > WALL_CAP_SECONDS:
         raise RuntimeError("BLOCKED_COST: actual wall-clock limit exceeded")
     if peak_rss_bytes > MEMORY_CAP_BYTES:
         raise RuntimeError("BLOCKED_COST: actual memory limit exceeded")
-    if raw_bytes > RAW_CAP_BYTES:
+    if member_bytes > RAW_CAP_BYTES:
         raise RuntimeError("BLOCKED_COST: actual raw-storage limit exceeded")
     manifest = {
         "schema_version": 1,
@@ -248,28 +414,32 @@ def seal_run(run_dir: Path, out_path: Path | None = None) -> dict:
         "resource_totals": {
             "wall_seconds": wall_seconds,
             "peak_rss_bytes": peak_rss_bytes,
-            "raw_bytes": raw_bytes,
+            "raw_bytes": member_bytes,
             "wall_cap_seconds": WALL_CAP_SECONDS,
             "memory_cap_bytes": MEMORY_CAP_BYTES,
             "raw_cap_bytes": RAW_CAP_BYTES,
         },
     }
-    write_json_atomic(out_path, manifest)
-    _create_archive(
+    archive_path = _write_manifest_and_archive(
         manifest_path=out_path,
+        manifest=manifest,
         entries=entries,
         root=root,
         run_dir=run_dir,
     )
+    if archive_path.stat().st_size > RAW_CAP_BYTES:
+        raise RuntimeError("BLOCKED_COST: actual replay archive exceeds storage limit")
     verify_sealed_manifest(out_path)
     return manifest
 
 
-def verify_sealed_manifest(path: Path) -> dict:
+def verify_sealed_manifest(path: Path, *, require_archive: bool = True) -> dict:
+    configure_determinism(0)
     root = repository_root()
     commit, run_lock_hash, _ = verify_run_lock(root)
     path = path.resolve()
     run_dir = path.parent
+    require_scientific_run_path(run_dir, commit_sha=commit, relative=".")
     manifest = json.loads(path.read_text())
     if (
         manifest.get("schema_version") != 1
@@ -290,7 +460,14 @@ def verify_sealed_manifest(path: Path) -> dict:
     observed_repository = sorted(
         entry["path"] for entry in entries if entry.get("scope") == "repository"
     )
-    if observed_run != expected_run_files or observed_repository != expected_repository_files:
+    observed_replay = sorted(
+        entry["path"] for entry in entries if entry.get("scope") == "replay"
+    )
+    if (
+        observed_run != expected_run_files
+        or observed_repository != expected_repository_files
+        or observed_replay != ["README.txt", "source.bundle"]
+    ):
         raise ValueError("sealed manifest does not contain the exact replay tree")
     for entry in entries:
         if entry.get("scope") == "run":
@@ -299,6 +476,8 @@ def verify_sealed_manifest(path: Path) -> dict:
             target = (root / entry["path"]).resolve()
             if not target.is_relative_to(root):
                 raise ValueError("repository manifest path escapes the root")
+        elif entry.get("scope") == "replay":
+            target = _safe_run_path(run_dir, f"replay/{entry['path']}")
         else:
             raise ValueError("sealed manifest contains an unknown scope")
         if (
@@ -307,34 +486,44 @@ def verify_sealed_manifest(path: Path) -> dict:
             or sha256_file(target) != entry.get("sha256")
         ):
             raise ValueError(f"sealed content mismatch: {entry.get('path')}")
+    _verify_git_bundle(run_dir / "replay" / "source.bundle", root=root, commit=commit)
     ordered = sorted(entries, key=lambda value: (value["scope"], value["path"]))
     if manifest.get("content_tree_sha256") != _canonical_tree_hash(ordered):
         raise ValueError("sealed content-tree hash mismatch")
     archive_path = root / "bundles" / f"{manifest['content_tree_sha256']}.tar"
-    _verify_archive(
-        archive_path=archive_path,
-        manifest_path=path,
-        entries=ordered,
-    )
+    if require_archive:
+        _verify_archive(
+            archive_path=archive_path,
+            manifest_path=path,
+            entries=ordered,
+        )
     totals = manifest.get("resource_totals", {})
-    panel_metadata = json.loads((run_dir / "panel.json").read_text())
+    panel = load_numeric_npz(run_dir / "panel.npz")
+    panel_wall, panel_peak = _validated_panel_resources(
+        run_dir, panel, commit=commit, run_lock_hash=run_lock_hash
+    )
     computed_wall = (
-        float(panel_metadata["wall_seconds"])
+        panel_wall
         + float(prediction_ledger["wall_seconds"])
         + float(derived_ledger["wall_seconds"])
     )
     computed_peak = max(
-        int(panel_metadata["peak_rss_bytes"]),
+        panel_peak,
         int(prediction_ledger["peak_rss_bytes"]),
         int(derived_ledger.get("peak_rss_bytes", 0)),
     )
-    computed_raw = sum(
-        int(entry["size"]) for entry in entries if entry["scope"] == "run"
-    )
+    member_bytes = sum(int(entry["size"]) for entry in entries)
+    try:
+        recorded_raw = int(totals["raw_bytes"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("sealed raw-byte total is missing") from error
+    if recorded_raw < member_bytes:
+        raise ValueError("sealed raw-byte total is smaller than its members")
+    computed_raw = archive_path.stat().st_size if require_archive else recorded_raw
     if (
         float(totals.get("wall_seconds", np.inf)) != computed_wall
         or int(totals.get("peak_rss_bytes", -1)) != computed_peak
-        or int(totals.get("raw_bytes", -1)) != computed_raw
+        or recorded_raw != computed_raw
     ):
         raise ValueError("sealed resource totals do not match the replay tree")
     if (

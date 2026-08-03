@@ -1,5 +1,6 @@
 import argparse
 import json
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -17,9 +18,10 @@ from .provenance import (
     WALL_CAP_SECONDS,
     load_locked_query_banks,
     repository_root,
+    verify_runtime,
 )
 from .storage import load_numeric_npz, write_json_atomic, write_numeric_npz_atomic
-from .registry import sha256_file
+from .registry import package_source_hashes, sha256_file, validation_input_hashes
 
 
 SMOKE_COMMIT = "5b0c0e" * 6 + "5b0c"
@@ -28,6 +30,7 @@ SMOKE_COMMIT = "5b0c0e" * 6 + "5b0c"
 def run_smoke(out_path: Path) -> dict:
     configure_determinism(0)
     root = repository_root()
+    verify_runtime(root)
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="pfn-dag-smoke-v3-") as temporary:
         run_dir = Path(temporary)
@@ -73,17 +76,51 @@ def run_smoke(out_path: Path) -> dict:
 
         panel_bytes = panel_path.stat().st_size
         panel_bytes += panel_path.with_suffix(".json").stat().st_size
-        prediction_bytes = sum(
+        prediction_shard_bytes = sum(
             (prediction_dir / record["path"]).stat().st_size
             for record in prediction_ledger["records"]
         )
-        prediction_bytes += (prediction_dir / "prediction_ledger.json").stat().st_size
+        prediction_metadata_bytes = (
+            (prediction_dir / "prediction_ledger.json").stat().st_size
+            + (run_dir / "pre_score_guard.json").stat().st_size
+            + (run_dir / "score_progress.json").stat().st_size
+        )
+        prediction_bytes = prediction_shard_bytes + prediction_metadata_bytes
+        replay_bundle_path = run_dir / "projected-source.bundle"
+        subprocess.run(
+            ["git", "bundle", "create", str(replay_bundle_path), "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        replay_bundle_bytes = replay_bundle_path.stat().st_size
+        tracked_output = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        tracked_paths = [
+            item.decode("utf-8") for item in tracked_output.split(b"\0") if item
+        ]
+        tracked_repository_bytes = sum(
+            (root / relative).stat().st_size for relative in tracked_paths
+        )
 
         group_ratio = 256 / 8
         shard_ratio = 64 / len(prediction_ledger["records"])
+        smoke_guard_records = len(prediction_ledger["golden"]["records"])
+        guard_ratio = 128 / smoke_guard_records
         inference_ratio = group_ratio * shard_ratio
         projected_panel_wall = panel_metadata["wall_seconds"] * group_ratio * 1.25
-        projected_score_wall = prediction_ledger["wall_seconds"] * inference_ratio * 1.25
+        guard_wall = float(prediction_ledger["golden_wall_seconds"])
+        non_guard_score_wall = prediction_ledger["wall_seconds"] - guard_wall
+        if guard_wall <= 0 or non_guard_score_wall <= 0:
+            raise AssertionError("smoke score timing components must be positive")
+        projected_guard_wall = guard_wall * guard_ratio * 1.25
+        projected_inference_wall = non_guard_score_wall * inference_ratio * 1.25
+        projected_score_wall = projected_guard_wall + projected_inference_wall
         projected_derive_wall = derive_wall * inference_ratio * 1.25
         projected_wall = (
             projected_panel_wall + projected_score_wall + projected_derive_wall
@@ -92,8 +129,11 @@ def run_smoke(out_path: Path) -> dict:
             1.25
             * (
                 panel_bytes * group_ratio
-                + prediction_bytes * inference_ratio
+                + prediction_shard_bytes * inference_ratio
+                + prediction_metadata_bytes * guard_ratio
                 + derived_bytes * inference_ratio
+                + replay_bundle_bytes
+                + tracked_repository_bytes
                 + 10 * 2**20
             )
         )
@@ -107,6 +147,8 @@ def run_smoke(out_path: Path) -> dict:
         result = {
             "schema_version": 1,
             "producer_sha256": sha256_file(Path(__file__)),
+            "implementation_sha256s": package_source_hashes(),
+            "input_sha256s": validation_input_hashes(),
             "smoke_stream_label": "smoke-v3",
             "smoke_kind": "interior-selected-end-to-end-v3",
             "smoke_commit": SMOKE_COMMIT,
@@ -119,18 +161,28 @@ def run_smoke(out_path: Path) -> dict:
             "candidate_block_count": panel_metadata["candidate_block_count"],
             "eligible_replace_rows": int(panel["eligible_replace"].sum()),
             "prediction_shards": len(prediction_ledger["records"]),
+            "guard_records": smoke_guard_records,
+            "guard_sample_source": prediction_ledger["golden"]["sample_source"],
+            "projected_scientific_guard_records": 128,
             "components": {
                 "panel_wall_seconds": panel_metadata["wall_seconds"],
                 "score_wall_seconds": prediction_ledger["wall_seconds"],
+                "guard_wall_seconds": guard_wall,
+                "non_guard_score_wall_seconds": non_guard_score_wall,
                 "derive_wall_seconds": derive_wall,
                 "panel_bytes": panel_bytes,
+                "prediction_shard_bytes": prediction_shard_bytes,
+                "prediction_metadata_bytes": prediction_metadata_bytes,
                 "prediction_bytes": prediction_bytes,
                 "derived_bytes": derived_bytes,
+                "replay_bundle_bytes": replay_bundle_bytes,
+                "tracked_repository_bytes": tracked_repository_bytes,
                 "measured_peak_rss_bytes": _peak_rss_bytes(),
             },
             "projection_multipliers": {
                 "group_ratio": group_ratio,
                 "shard_ratio": shard_ratio,
+                "guard_ratio": guard_ratio,
                 "safety_factor": 1.25,
             },
             "projected_wall_seconds": projected_wall,

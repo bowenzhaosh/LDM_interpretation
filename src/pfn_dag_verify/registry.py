@@ -13,6 +13,32 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def package_source_hashes() -> dict[str, str]:
+    package = Path(__file__).resolve().parent
+    return {
+        path.name: sha256_file(path)
+        for path in sorted(package.glob("*.py"), key=lambda value: value.name)
+    }
+
+
+def validation_input_hashes() -> dict[str, str]:
+    root = Path(__file__).resolve().parents[2]
+    registry_path = root / "config" / "checkpoint_registry.json"
+    registry = json.loads(registry_path.read_text())
+    relative_paths = {
+        "config/query_bank.json",
+        "config/checkpoint_registry.json",
+        "artifacts/legacy/stage1_functional_law.py",
+        "environment/runtime.json",
+        "environment/requirements-lock.txt",
+        "environment/installed-distributions.json",
+        *(str(record["path"]) for record in registry.get("original_sources", [])),
+    }
+    return {
+        relative: sha256_file(root / relative) for relative in sorted(relative_paths)
+    }
+
+
 def verify_file_record(record: dict, *, root: str | Path | None = None) -> None:
     required = {"path", "size", "sha256"}
     missing = required - set(record)

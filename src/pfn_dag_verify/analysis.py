@@ -14,8 +14,10 @@ from .instrument import (
     project_kl_batch,
     reconstruct_updated_batch,
 )
+from .model import configure_determinism
 from .provenance import (
     derive_seed,
+    require_scientific_run_path,
     repository_root,
     validate_locked_validations,
     verify_panel_lock,
@@ -189,76 +191,269 @@ def _validate_derived_shard(
         raise ValueError("derived panel hash mismatch")
 
 
+def _validate_derive_progress(
+    progress: dict,
+    *,
+    commit_sha: str,
+    panel_sha256: str,
+    prediction_ledger_sha256: str,
+    require_complete: bool,
+) -> None:
+    identity = {
+        "schema_version": 1,
+        "scientific": True,
+        "commit_sha": commit_sha,
+        "panel_sha256": panel_sha256,
+        "prediction_ledger_sha256": prediction_ledger_sha256,
+        "implementation_sha256": sha256_file(Path(__file__)),
+    }
+    expected_top = set(identity) | {
+        "attempts",
+        "cumulative_wall_seconds",
+        "peak_rss_bytes",
+        "validated_shard_identities",
+    }
+    if set(progress) != expected_top or any(
+        progress.get(key) != value for key, value in identity.items()
+    ):
+        raise ValueError("derive progress identity mismatch")
+    attempts = progress.get("attempts")
+    if not isinstance(attempts, list) or not attempts:
+        raise ValueError("derive progress has no attempts")
+    expected_attempt_keys = {
+        "attempt_index",
+        "status",
+        "wall_seconds",
+        "peak_rss_bytes",
+        "completed_shards",
+    }
+    attempts_valid = all(
+        set(attempt) == expected_attempt_keys
+        and attempt.get("attempt_index") == index
+        and attempt.get("status") in {"RUNNING", "INTERRUPTED", "COMPLETE"}
+        and (index == len(attempts) - 1 or attempt.get("status") != "RUNNING")
+        and np.isfinite(float(attempt.get("wall_seconds", np.nan)))
+        and float(attempt.get("wall_seconds", -1.0)) >= 0.0
+        and int(attempt.get("peak_rss_bytes", -1)) >= 0
+        and 0 <= int(attempt.get("completed_shards", -1)) <= 64
+        for index, attempt in enumerate(attempts)
+    )
+    identities = progress.get("validated_shard_identities")
+    identities_valid = isinstance(identities, list) and all(
+        isinstance(identity_value, list)
+        and len(identity_value) == 3
+        and tuple(int(value) for value in identity_value) in EXPECTED_IDENTITIES
+        for identity_value in identities
+    )
+    if (
+        not attempts_valid
+        or not identities_valid
+        or identities != sorted(identities)
+        or len(identities) != len({tuple(value) for value in identities})
+        or not np.isclose(
+            float(progress.get("cumulative_wall_seconds", np.nan)),
+            sum(float(attempt["wall_seconds"]) for attempt in attempts),
+            rtol=1e-12,
+            atol=1e-9,
+        )
+        or int(progress.get("peak_rss_bytes", -1))
+        != max(int(attempt["peak_rss_bytes"]) for attempt in attempts)
+    ):
+        raise ValueError("derive progress resource history mismatch")
+    if require_complete and (
+        attempts[-1]["status"] != "COMPLETE"
+        or {tuple(value) for value in identities} != EXPECTED_IDENTITIES
+    ):
+        raise ValueError("derive progress is incomplete")
+
+
+def _start_derive_progress(
+    path: Path,
+    *,
+    commit_sha: str,
+    panel_sha256: str,
+    prediction_ledger_sha256: str,
+) -> dict:
+    if path.exists():
+        progress = json.loads(path.read_text())
+        _validate_derive_progress(
+            progress,
+            commit_sha=commit_sha,
+            panel_sha256=panel_sha256,
+            prediction_ledger_sha256=prediction_ledger_sha256,
+            require_complete=False,
+        )
+        if progress["attempts"][-1]["status"] == "RUNNING":
+            progress["attempts"][-1]["status"] = "INTERRUPTED"
+        elif progress["attempts"][-1]["status"] != "COMPLETE":
+            raise ValueError("derive progress is not safely resumable")
+    else:
+        progress = {
+            "schema_version": 1,
+            "scientific": True,
+            "commit_sha": commit_sha,
+            "panel_sha256": panel_sha256,
+            "prediction_ledger_sha256": prediction_ledger_sha256,
+            "implementation_sha256": sha256_file(Path(__file__)),
+            "attempts": [],
+            "cumulative_wall_seconds": 0.0,
+            "peak_rss_bytes": 0,
+            "validated_shard_identities": [],
+        }
+    progress["attempts"].append(
+        {
+            "attempt_index": len(progress["attempts"]),
+            "status": "RUNNING",
+            "wall_seconds": 0.0,
+            "peak_rss_bytes": _peak_rss_bytes(),
+            "completed_shards": 0,
+        }
+    )
+    write_json_atomic(path, progress)
+    return progress
+
+
+def _update_derive_progress(
+    path: Path,
+    progress: dict,
+    *,
+    attempt_started: float,
+    records: list[dict],
+    status: str,
+) -> dict:
+    if status not in {"RUNNING", "COMPLETE"}:
+        raise ValueError("unsupported derive progress status")
+    progress["attempts"][-1].update(
+        {
+            "status": status,
+            "wall_seconds": time.perf_counter() - attempt_started,
+            "peak_rss_bytes": _peak_rss_bytes(),
+            "completed_shards": len(records),
+        }
+    )
+    progress["cumulative_wall_seconds"] = float(
+        sum(float(attempt["wall_seconds"]) for attempt in progress["attempts"])
+    )
+    progress["peak_rss_bytes"] = int(
+        max(int(attempt["peak_rss_bytes"]) for attempt in progress["attempts"])
+    )
+    progress["validated_shard_identities"] = sorted(
+        [
+            [int(record["seed"]), int(record["step"]), int(record["bank_index"])]
+            for record in records
+        ]
+    )
+    write_json_atomic(path, progress)
+    return progress
+
+
 def derive_all(*, panel_path: Path, prediction_dir: Path, out_dir: Path):
+    configure_determinism(0)
     started = time.perf_counter()
     panel, prediction_ledger, prediction_paths = verify_prediction_ledger(
         panel_path=panel_path, prediction_dir=prediction_dir
     )
     commit, _ = verify_panel_lock(panel)
+    require_scientific_run_path(
+        panel_path, commit_sha=commit, relative="panel.npz"
+    )
+    require_scientific_run_path(
+        prediction_dir, commit_sha=commit, relative="predictions"
+    )
+    require_scientific_run_path(
+        out_dir, commit_sha=commit, relative="derived"
+    )
     panel_hash = sha256_file(panel_path)
+    prediction_ledger_hash = sha256_file(
+        prediction_dir / "prediction_ledger.json"
+    )
     prediction_records = {
         record["path"]: record for record in prediction_ledger["records"]
     }
     out_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = out_dir.parent / "derive_progress.json"
+    progress = _start_derive_progress(
+        progress_path,
+        commit_sha=commit,
+        panel_sha256=panel_hash,
+        prediction_ledger_sha256=prediction_ledger_hash,
+    )
     records = []
-    for prediction_path in prediction_paths:
-        prediction_record = prediction_records[prediction_path.name]
-        prediction = load_numeric_npz(prediction_path)
-        bank_index = int(prediction["bank_index"])
-        seed = int(prediction["seed"])
-        step = int(prediction["step"])
-        identity = (seed, step, bank_index)
-        if identity not in EXPECTED_IDENTITIES:
-            raise ValueError(f"unexpected prediction identity: {identity}")
-        path = out_dir / f"derived_s{seed:02d}_step{step:05d}_bank{bank_index}.npz"
-        if path.exists():
-            existing = load_numeric_npz(path)
-            _validate_derived_shard(
-                existing,
-                groups=panel["core"].shape[0],
-                continuations=panel["continuations"].shape[1],
-                seed=seed,
-                step=step,
-                bank_index=bank_index,
-                prediction_sha256=prediction_record["sha256"],
-                panel_sha256=panel_hash,
+    try:
+        for prediction_path in prediction_paths:
+            prediction_record = prediction_records[prediction_path.name]
+            prediction = load_numeric_npz(prediction_path)
+            bank_index = int(prediction["bank_index"])
+            seed = int(prediction["seed"])
+            step = int(prediction["step"])
+            identity = (seed, step, bank_index)
+            if identity not in EXPECTED_IDENTITIES:
+                raise ValueError(f"unexpected prediction identity: {identity}")
+            path = out_dir / f"derived_s{seed:02d}_step{step:05d}_bank{bank_index}.npz"
+            if path.exists():
+                existing = load_numeric_npz(path)
+                _validate_derived_shard(
+                    existing,
+                    groups=panel["core"].shape[0],
+                    continuations=panel["continuations"].shape[1],
+                    seed=seed,
+                    step=step,
+                    bank_index=bank_index,
+                    prediction_sha256=prediction_record["sha256"],
+                    panel_sha256=panel_hash,
+                )
+            else:
+                derived = _derive_one(panel, prediction, bank_index)
+                write_numeric_npz_atomic(
+                    path,
+                    **derived,
+                    seed=np.asarray(seed, dtype=np.int16),
+                    step=np.asarray(step, dtype=np.int32),
+                    bank_index=np.asarray(bank_index, dtype=np.int8),
+                    prediction_sha256=np.frombuffer(
+                        bytes.fromhex(prediction_record["sha256"]), dtype=np.uint8
+                    ),
+                    panel_sha256=np.frombuffer(bytes.fromhex(panel_hash), dtype=np.uint8),
+                    scientific=np.asarray(1, dtype=np.int8),
+                )
+                _validate_derived_shard(
+                    load_numeric_npz(path),
+                    groups=panel["core"].shape[0],
+                    continuations=panel["continuations"].shape[1],
+                    seed=seed,
+                    step=step,
+                    bank_index=bank_index,
+                    prediction_sha256=prediction_record["sha256"],
+                    panel_sha256=panel_hash,
+                )
+            records.append(
+                {
+                    "seed": seed,
+                    "step": step,
+                    "bank_index": bank_index,
+                    "path": path.name,
+                    "sha256": sha256_file(path),
+                    "size": path.stat().st_size,
+                    "prediction": prediction_path.name,
+                    "prediction_sha256": prediction_record["sha256"],
+                }
             )
-        else:
-            derived = _derive_one(panel, prediction, bank_index)
-            write_numeric_npz_atomic(
-                path,
-                **derived,
-                seed=np.asarray(seed, dtype=np.int16),
-                step=np.asarray(step, dtype=np.int32),
-                bank_index=np.asarray(bank_index, dtype=np.int8),
-                prediction_sha256=np.frombuffer(
-                    bytes.fromhex(prediction_record["sha256"]), dtype=np.uint8
-                ),
-                panel_sha256=np.frombuffer(bytes.fromhex(panel_hash), dtype=np.uint8),
-                scientific=np.asarray(1, dtype=np.int8),
+            progress = _update_derive_progress(
+                progress_path,
+                progress,
+                attempt_started=started,
+                records=records,
+                status="RUNNING",
             )
-            _validate_derived_shard(
-                load_numeric_npz(path),
-                groups=panel["core"].shape[0],
-                continuations=panel["continuations"].shape[1],
-                seed=seed,
-                step=step,
-                bank_index=bank_index,
-                prediction_sha256=prediction_record["sha256"],
-                panel_sha256=panel_hash,
-            )
-        records.append(
-            {
-                "seed": seed,
-                "step": step,
-                "bank_index": bank_index,
-                "path": path.name,
-                "sha256": sha256_file(path),
-                "size": path.stat().st_size,
-                "prediction": prediction_path.name,
-                "prediction_sha256": prediction_record["sha256"],
-            }
+    except BaseException:
+        _update_derive_progress(
+            progress_path,
+            progress,
+            attempt_started=started,
+            records=records,
+            status="RUNNING",
         )
+        raise
     identities = {
         (record["seed"], record["step"], record["bank_index"]) for record in records
     }
@@ -268,17 +463,23 @@ def derive_all(*, panel_path: Path, prediction_dir: Path, out_dir: Path):
     expected_names = {record["path"] for record in records}
     if actual_names != expected_names:
         raise ValueError("derived directory contains a stale or missing shard")
+    progress = _update_derive_progress(
+        progress_path,
+        progress,
+        attempt_started=started,
+        records=records,
+        status="COMPLETE",
+    )
     ledger = {
         "schema_version": 1,
         "scientific": True,
         "commit_sha": commit,
         "panel_sha256": panel_hash,
-        "prediction_ledger_sha256": sha256_file(
-            prediction_dir / "prediction_ledger.json"
-        ),
+        "prediction_ledger_sha256": prediction_ledger_hash,
+        "derive_progress_sha256": sha256_file(progress_path),
         "records": records,
-        "wall_seconds": time.perf_counter() - started,
-        "peak_rss_bytes": _peak_rss_bytes(),
+        "wall_seconds": progress["cumulative_wall_seconds"],
+        "peak_rss_bytes": progress["peak_rss_bytes"],
     }
     write_json_atomic(out_dir / "derived_ledger.json", ledger)
     return ledger
@@ -293,15 +494,43 @@ def verify_derived_ledger(
     commit, _ = verify_panel_lock(panel)
     panel_hash = sha256_file(panel_path)
     ledger = json.loads((derived_dir / "derived_ledger.json").read_text())
+    prediction_ledger_hash = sha256_file(prediction_dir / "prediction_ledger.json")
+    progress_path = derived_dir.parent / "derive_progress.json"
     if (
         ledger.get("schema_version") != 1
         or ledger.get("scientific") is not True
         or ledger.get("commit_sha") != commit
         or ledger.get("panel_sha256") != panel_hash
-        or ledger.get("prediction_ledger_sha256")
-        != sha256_file(prediction_dir / "prediction_ledger.json")
+        or ledger.get("prediction_ledger_sha256") != prediction_ledger_hash
+        or ledger.get("derive_progress_sha256") != sha256_file(progress_path)
     ):
         raise ValueError("derived ledger identity mismatch")
+    progress = json.loads(progress_path.read_text())
+    _validate_derive_progress(
+        progress,
+        commit_sha=commit,
+        panel_sha256=panel_hash,
+        prediction_ledger_sha256=prediction_ledger_hash,
+        require_complete=True,
+    )
+    try:
+        wall_seconds = float(ledger["wall_seconds"])
+        peak_rss_bytes = int(ledger["peak_rss_bytes"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("derived ledger resource fields are invalid") from error
+    if (
+        not np.isfinite(wall_seconds)
+        or wall_seconds < 0.0
+        or peak_rss_bytes < 0
+        or not np.isclose(
+            wall_seconds,
+            float(progress["cumulative_wall_seconds"]),
+            rtol=1e-12,
+            atol=1e-9,
+        )
+        or peak_rss_bytes != int(progress["peak_rss_bytes"])
+    ):
+        raise ValueError("derived ledger resources do not match cumulative progress")
     records = ledger.get("records")
     if not isinstance(records, list) or len(records) != 64:
         raise ValueError("derived ledger must contain exactly 64 records")
@@ -654,15 +883,23 @@ def _mapping_block(panel, shards, bank_index, contrast="replace"):
     return result
 
 
-def summarize(*, run_dir: Path):
+def _summarize(*, run_dir: Path, replay_mode: bool):
+    configure_determinism(0)
     from .seal import verify_sealed_manifest
 
     run_dir = run_dir.resolve()
     panel_path = run_dir / "panel.npz"
+    panel_preview = load_numeric_npz(panel_path)
+    preview_commit, _ = verify_panel_lock(panel_preview)
+    require_scientific_run_path(
+        run_dir, commit_sha=preview_commit, relative="."
+    )
     prediction_dir = run_dir / "predictions"
     derived_dir = run_dir / "derived"
     manifest_path = run_dir / "sealed_manifest.json"
-    manifest = verify_sealed_manifest(manifest_path)
+    manifest = verify_sealed_manifest(
+        manifest_path, require_archive=not replay_mode
+    )
     archive_path = (
         repository_root()
         / "bundles"
@@ -787,9 +1024,26 @@ def summarize(*, run_dir: Path):
             nrmse_upper=tuple(block["nrmse_interval"][1] for block in replace),
         )
     )
+    replay_archive = (
+        {
+            "path": archive_path.relative_to(repository_root()).as_posix(),
+            "sha256": sha256_file(archive_path),
+            "size": archive_path.stat().st_size,
+            "verification": "content-addressed-archive",
+        }
+        if not replay_mode
+        else {
+            "path": None,
+            "sha256": None,
+            "size": None,
+            "verification": "extracted-manifest-tree",
+        }
+    )
     summary = {
         "schema_version": 2,
-        "status": "LOCALLY_VERIFIED",
+        "status": (
+            "REPLAY_VERIFIED_NONCANONICAL" if replay_mode else "LOCALLY_VERIFIED"
+        ),
         "decision": {"code": decision.code, "reason": decision.reason},
         "licensed_scope": (
             "Frozen induced-coordinate response on the tested identifiable-interior AL40 "
@@ -798,11 +1052,7 @@ def summarize(*, run_dir: Path):
         "panel_sha256": sha256_file(panel_path),
         "sealed_manifest_sha256": sha256_file(manifest_path),
         "content_tree_sha256": manifest["content_tree_sha256"],
-        "replay_archive": {
-            "path": archive_path.relative_to(repository_root()).as_posix(),
-            "sha256": sha256_file(archive_path),
-            "size": archive_path.stat().st_size,
-        },
+        "replay_archive": replay_archive,
         "commit_sha": commit,
         "seed_record": seed_record,
         "validations": validations,
@@ -814,9 +1064,19 @@ def summarize(*, run_dir: Path):
         "training_secondary": training,
         "resource_totals": manifest["resource_totals"],
     }
-    out_path = run_dir / "summary.json"
+    out_path = run_dir / ("replay_summary.json" if replay_mode else "summary.json")
     write_json_atomic(out_path, summary)
     return summary
+
+
+def summarize(*, run_dir: Path):
+    """Write the canonical verdict, requiring the content-addressed archive."""
+    return _summarize(run_dir=run_dir, replay_mode=False)
+
+
+def replay_summarize(*, run_dir: Path):
+    """Recompute from an extracted archive without issuing a canonical verdict."""
+    return _summarize(run_dir=run_dir, replay_mode=True)
 
 
 def main(argv=None):
@@ -828,6 +1088,8 @@ def main(argv=None):
     derive.add_argument("--out", type=Path, required=True)
     summary = subparsers.add_parser("summarize")
     summary.add_argument("--run-dir", type=Path, required=True)
+    replay = subparsers.add_parser("replay")
+    replay.add_argument("--run-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "derive":
         ledger = derive_all(panel_path=args.panel, prediction_dir=args.predictions, out_dir=args.out)
@@ -837,10 +1099,11 @@ def main(argv=None):
                 sort_keys=True,
             )
         )
+    elif args.command == "summarize":
+        result = summarize(run_dir=args.run_dir)
+        print(json.dumps({"decision": result["decision"], "status": result["status"]}))
     else:
-        result = summarize(
-            run_dir=args.run_dir,
-        )
+        result = replay_summarize(run_dir=args.run_dir)
         print(json.dumps({"decision": result["decision"], "status": result["status"]}))
 
 
