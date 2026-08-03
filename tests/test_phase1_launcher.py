@@ -370,6 +370,10 @@ def test_wrapper_uses_isolated_no_site_python_and_derived_attempt_paths():
     assert 'if [[ "${PHASE1_MODE}" != "verify" ]]' in wrapper
     assert "run_locked_module pip check" in wrapper
     assert "phase1_confirmation_verify" in wrapper
+    config = json.loads((ROOT / "config/phase1_ordering_confirmation.json").read_text())
+    tag_match = re.search(r"--attempt-tag\s+([^\s\\]+)", wrapper)
+    assert tag_match is not None
+    assert tag_match.group(1) == config["required_attempt_tag"]
     common = (ROOT / "src/pfn_dag_verify/phase1_confirm_common.py").read_text()
     assert '[sys.executable, "-m", "pip", "check"]' not in common
 

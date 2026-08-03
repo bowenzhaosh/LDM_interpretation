@@ -6,12 +6,14 @@ import pytest
 import torch
 
 from pfn_dag_verify.phase1_confirm_common import (
+    CANONICAL_CONFIRMATION_SOURCES,
     _qualification_artifact_hashes,
     _verify_qualification_artifacts,
     attempt_identity,
     sha256_file,
     validate_confirmation_config,
 )
+from pfn_dag_verify.phase1_confirmation_verify import CANONICAL_SOURCES
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -195,6 +197,11 @@ def test_confirmation_config_freezes_qualified_substrate():
     assert config["bootstrap"]["replicates"] == 50000
     assert config["bootstrap"]["chunk_size"] == 256
     assert config["pfn_batch_size"] == 64
+    assert config["pfn_batch_logp_atol"] == 5e-5
+    assert config["pfn_combined_context_batch_logp_atol"] == 8e-5
+    assert config["pfn_context_permutation_logp_atol"] == 3e-5
+    assert config["pfn_replay_probability_atol"] == 1e-6
+    assert config["pfn_replay_total_variation_atol"] == 3e-6
 
 
 def test_confirmation_seed_namespaces_are_disjoint_except_qualified_atom_reuse():
@@ -268,9 +275,14 @@ def test_all_producers_derive_one_portable_canonical_attempt_identity():
     source_inventory = identities[0][0]["source_inventory"]
     assert "PHASE1_ORDERING_CONFIRMATION_AMENDMENT.md" in source_inventory
     assert "PHASE1_ORDERING_CONFIRMATION_FIX1.md" in source_inventory
+    assert "PHASE1_ORDERING_CONFIRMATION_FIX2.md" in source_inventory
     assert "cluster/submit_phase1_confirmation.py" in source_inventory
-    assert "cluster/submit_phase1_confirmation.py" in source_inventory
+    assert any(name.endswith("p1-replay-sweep-160041.out") for name in source_inventory)
     assert all(not Path(name).is_absolute() for name in source_inventory)
+
+
+def test_common_and_independent_verifier_use_the_same_canonical_sources():
+    assert CANONICAL_SOURCES == CANONICAL_CONFIRMATION_SOURCES
 
 
 def test_production_identity_fails_before_runtime_when_checkpoint_mount_is_missing():

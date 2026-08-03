@@ -77,6 +77,14 @@ CANONICAL_SOURCES = (
     "PHASE1_ORDERING_PREREG.md",
     "PHASE1_ORDERING_CONFIRMATION_AMENDMENT.md",
     "PHASE1_ORDERING_CONFIRMATION_FIX1.md",
+    "PHASE1_ORDERING_CONFIRMATION_FIX2.md",
+    "campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix1_attempt2_failed/ARTIFACT_SHA256SUMS",
+    "campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix1_attempt2_failed/TERMINAL_STATUS.json",
+    "campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix1_attempt2_failed/diagnostics/pfn-replay-sweep-runtime-v2-2157aa0.py",
+    "campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix1_attempt2_failed/diagnostics/pfn-replay-full-panel-v3-2157aa0.py",
+    "campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix1_attempt2_failed/slurm/p1-replay-sweep-160038.out",
+    "campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix1_attempt2_failed/slurm/p1-replay-sweep-160040.out",
+    "campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix1_attempt2_failed/slurm/p1-replay-sweep-160041.out",
     "config/phase1_ordering_confirmation.json",
     "config/phase1_checkpoint_registry.json",
     "artifacts/phase1/d4_generator.py",
@@ -511,6 +519,7 @@ def _half_gate(half: dict[str, np.ndarray], config: dict[str, Any]) -> dict[str,
     fraction_limit = float(
         config["gates"]["full_oracle_half_change_fraction_of_positive_gap_max"]
     )
+    replay_bound = float(config["pfn_combined_context_batch_logp_atol"])
     for prior_code, prior in enumerate(("C", "N")):
         mask = half["prior_code"] == prior_code
         if int(mask.sum()) != 200:
@@ -529,6 +538,7 @@ def _half_gate(half: dict[str, np.ndarray], config: dict[str, Any]) -> dict[str,
         d_ci = _interval(bootstrap["d"][prior_code])
         e_ci = _interval(bootstrap["e"][prior_code])
         g_lower = float(np.quantile(bootstrap["g"][prior_code], 0.05, method="linear"))
+        replay_robust_g_lower = g_lower - replay_bound
         e_ci_abs_max = max(abs(e_ci[0]), abs(e_ci[1]))
         d_values[prior] = d
         reports[prior] = {
@@ -538,12 +548,14 @@ def _half_gate(half: dict[str, np.ndarray], config: dict[str, Any]) -> dict[str,
             "full_full_minus_half_ci95": e_ci,
             "fixed_fleet_final_gap": g,
             "fixed_fleet_final_gap_one_sided_95_lower": g_lower,
-            "positive_gap": g_lower > 0.0,
+            "pfn_single_nll_replay_bound": replay_bound,
+            "replay_robust_gap_one_sided_95_lower": replay_robust_g_lower,
+            "positive_gap": replay_robust_g_lower > 0.0,
             "full_change_fraction": abs(e) / g if g > 0.0 else None,
             "full_predictive_pass": bool(
-                g_lower > 0.0
+                replay_robust_g_lower > 0.0
                 and e_ci_abs_max < full_limit
-                and e_ci_abs_max < fraction_limit * g_lower
+                and e_ci_abs_max < fraction_limit * replay_robust_g_lower
             ),
         }
     difference = abs(d_values["C"] - d_values["N"])
@@ -585,6 +597,14 @@ def _decide(
     clearance = float(gates["primary_numerical_clearance"])
     positive_boundary = effect_floor - clearance
     rejection_boundary = effect_floor + clearance
+    replay_epsilon = float(config["pfn_combined_context_batch_logp_atol"])
+    replay_bounds = {
+        "single_pfn_nll": replay_epsilon,
+        "direct_deficit_or_gap": replay_epsilon,
+        "causal_minus_control_delta": 2.0 * replay_epsilon,
+        "direct_checkpoint_change": 2.0 * replay_epsilon,
+        "delta_difference_in_differences": 4.0 * replay_epsilon,
+    }
     if clearance <= 0.0:
         raise RuntimeError("primary numerical clearance must be positive")
     c_lower = float(
@@ -607,8 +627,8 @@ def _decide(
     kl_clear_boundary = kl_threshold + clearance
     for prior_code, prior in enumerate(("C", "N")):
         ci = _interval(bootstrap["gap_final"][prior_code])
-        alarm = ci[1] < kl_alarm_boundary
-        clear = ci[1] >= kl_clear_boundary
+        alarm = kl_alarm_boundary - ci[1] > replay_bounds["direct_deficit_or_gap"]
+        clear = ci[1] - kl_clear_boundary > replay_bounds["direct_deficit_or_gap"]
         kl_alarm[prior] = {
             "point": float(points["gap_final"][prior_code]),
             "ci95": ci,
@@ -617,6 +637,7 @@ def _decide(
             "clear": clear,
             "alarm_boundary": kl_alarm_boundary,
             "clear_boundary": kl_clear_boundary,
+            "pfn_replay_bound": replay_bounds["direct_deficit_or_gap"],
         }
         kl_clear = kl_clear and clear
     validity = {
@@ -637,54 +658,84 @@ def _decide(
         for prior_code, prior in enumerate(("C", "N")):
             point = float(points["deficit"][prior_code, index])
             ci = _interval(bootstrap["deficit"][prior_code, index])
+            decision_endpoint = max(point, ci[1])
+            endpoint_replay_bound = replay_bounds["direct_deficit_or_gap"]
             effect = bool(
                 prior == "C" and point < effect_floor and ci[1] < effect_floor
             )
             direct = bool(
-                prior == "C" and point < positive_boundary and ci[1] < positive_boundary
+                prior == "C"
+                and positive_boundary - decision_endpoint > endpoint_replay_bound
             )
-            decision_endpoint = max(point, ci[1])
+            clearly_fails = bool(
+                prior == "C"
+                and decision_endpoint - rejection_boundary > endpoint_replay_bound
+            )
             deficits[prior][str(step)] = {
                 "point": point,
                 "ci95": ci,
                 "passes_effect_floor": effect,
                 "passes_direct_rule": direct,
+                "pfn_replay_bound": endpoint_replay_bound,
+                "distance_beyond_positive_boundary": (
+                    positive_boundary - decision_endpoint
+                ),
+                "distance_beyond_rejection_boundary": (
+                    decision_endpoint - rejection_boundary
+                ),
                 "numerically_borderline": bool(
-                    prior == "C"
-                    and positive_boundary <= decision_endpoint < rejection_boundary
+                    prior == "C" and not direct and not clearly_fails
                 ),
-                "clearly_fails_effect_rule": bool(
-                    prior == "C" and decision_endpoint >= rejection_boundary
-                ),
+                "clearly_fails_effect_rule": clearly_fails,
             }
         point = float(points["delta"][index])
         ci = _interval(bootstrap["delta"][index])
-        effect = bool(point < effect_floor and ci[1] < effect_floor)
-        direct = bool(point < positive_boundary and ci[1] < positive_boundary)
         decision_endpoint = max(point, ci[1])
+        endpoint_replay_bound = replay_bounds["causal_minus_control_delta"]
+        effect = bool(point < effect_floor and ci[1] < effect_floor)
+        direct = bool(positive_boundary - decision_endpoint > endpoint_replay_bound)
+        clearly_fails = bool(
+            decision_endpoint - rejection_boundary > endpoint_replay_bound
+        )
         deltas[str(step)] = {
             "point": point,
             "ci95": ci,
             "passes_effect_floor": effect,
             "passes_rule": direct,
-            "numerically_borderline": bool(
-                positive_boundary <= decision_endpoint < rejection_boundary
+            "pfn_replay_bound": endpoint_replay_bound,
+            "distance_beyond_positive_boundary": (
+                positive_boundary - decision_endpoint
             ),
-            "clearly_fails_effect_rule": bool(decision_endpoint >= rejection_boundary),
+            "distance_beyond_rejection_boundary": (
+                decision_endpoint - rejection_boundary
+            ),
+            "numerically_borderline": bool(not direct and not clearly_fails),
+            "clearly_fails_effect_rule": clearly_fails,
         }
     for prior_code, prior in enumerate(("C", "N")):
         point = float(points["deficit_change_final_minus_early"][prior_code])
         ci = _interval(bootstrap["deficit_change_final_minus_early"][prior_code])
+        decision_endpoint = max(point, ci[1])
+        endpoint_replay_bound = replay_bounds["direct_checkpoint_change"]
         effect = bool(prior == "C" and point < effect_floor and ci[1] < effect_floor)
+        replay_pass = bool(
+            prior == "C" and effect_floor - decision_endpoint > endpoint_replay_bound
+        )
         changes[prior] = {
             "point": point,
             "ci95": ci,
             "passes_effect_floor": effect,
-            "passes_direct_change_rule": effect,
+            "passes_direct_change_rule": replay_pass,
+            "pfn_replay_bound": endpoint_replay_bound,
+            "distance_beyond_effect_floor": effect_floor - decision_endpoint,
+            "replay_sensitive": bool(prior == "C" and effect and not replay_pass),
         }
     change_point = float(points["delta_change_final_minus_early"])
     change_ci = _interval(bootstrap["delta_change_final_minus_early"])
     change_effect = bool(change_point < effect_floor and change_ci[1] < effect_floor)
+    change_endpoint = max(change_point, change_ci[1])
+    change_replay_bound = replay_bounds["delta_difference_in_differences"]
+    change_replay_pass = bool(effect_floor - change_endpoint > change_replay_bound)
     if not all_valid:
         primary = secondary = "NOT_EVALUATED"
         decision = "INCONCLUSIVE_PHASE1_INSTRUMENT"
@@ -703,16 +754,30 @@ def _decide(
             primary = "NOT_REPLICATED_ORDERING_USE"
         else:
             primary = "INCONCLUSIVE_PHASE1_NUMERICAL_CLEARANCE"
-        change_pass = bool(changes["C"]["passes_effect_floor"] and change_effect)
+        change_pass = bool(
+            changes["C"]["passes_direct_change_rule"] and change_replay_pass
+        )
         early_clear_failure = bool(
             deficits["C"]["20000"]["clearly_fails_effect_rule"]
             or deltas["20000"]["clearly_fails_effect_rule"]
         )
         secondary_pass = bool(final_pass and early_clear_failure and change_pass)
+        early_nominal_clear_failure = bool(
+            deficits["C"]["20000"]["distance_beyond_rejection_boundary"] > 0.0
+            or deltas["20000"]["distance_beyond_rejection_boundary"] > 0.0
+        )
+        nominal_secondary_components = bool(
+            final_pass
+            and early_nominal_clear_failure
+            and changes["C"]["passes_effect_floor"]
+            and change_effect
+        )
         if primary == "INCONCLUSIVE_PHASE1_NUMERICAL_CLEARANCE":
             secondary = "NOT_EVALUATED_PRIMARY_NUMERICALLY_UNCLEARED"
         elif secondary_pass:
             secondary = "SUPPORTED_UNDERTRAINING_CAN_OBSCURE_ORDERING_ADVANTAGE"
+        elif nominal_secondary_components:
+            secondary = "INCONCLUSIVE_UNDERTRAINING_REPLAY_SENSITIVITY"
         else:
             secondary = "NOT_SUPPORTED_UNDERTRAINING_CLAIM"
         decision = primary
@@ -738,14 +803,20 @@ def _decide(
             "point": change_point,
             "ci95": change_ci,
             "passes_effect_floor": change_effect,
-            "passes_rule": change_effect,
+            "passes_rule": change_replay_pass,
+            "pfn_replay_bound": change_replay_bound,
+            "distance_beyond_effect_floor": effect_floor - change_endpoint,
+            "replay_sensitive": bool(change_effect and not change_replay_pass),
         },
         "numerical_clearance": {
             "effect_floor": effect_floor,
-            "clearance_nats": clearance,
+            "oracle_clearance_nats": clearance,
             "clearance_boundary": positive_boundary,
             "rejection_boundary": rejection_boundary,
-            "borderline_action": "stop_without_claim_and_run_registered_higher_fidelity_oracle",
+            "pfn_replay_bounds": replay_bounds,
+            "borderline_action": (
+                "stop_without_claim_and_increase_numeric_fidelity_or_replay_stability"
+            ),
         },
     }
 

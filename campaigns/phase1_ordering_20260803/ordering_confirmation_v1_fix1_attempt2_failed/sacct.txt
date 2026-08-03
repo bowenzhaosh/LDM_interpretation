@@ -1,3 +1,7 @@
+# collected_at_utc=2026-08-03T21:04:59Z
+# source_host=ssh-shell-2.engr.wustl.edu
+# slurm_timezone=CDT (UTC-05:00)
+# query=sacct -X -j 160020,160021,160022,160023,160024,160025,160026,160027,160028,160030,160038,160040,160041 --format=JobIDRaw,JobName,State,ExitCode,Elapsed,Start,End,NodeList,ReqTRES,MaxRSS -P -n
 JobIDRaw|JobName|State|ExitCode|Elapsed|Start|End|NodeList|ReqTRES
 160020|p1-panel|COMPLETED|0:0|00:01:13|2026-08-03T15:01:51|2026-08-03T15:03:04|a100-2207|billing=8,cpu=8,gres/gpu:a100=1,gres/gpu=1,mem=64G,node=1
 160021|p1-pfn|FAILED|1:0|00:00:45|2026-08-03T15:03:05|2026-08-03T15:03:50|a100-2207|billing=8,cpu=8,gres/gpu:a100=1,gres/gpu=1,mem=64G,node=1

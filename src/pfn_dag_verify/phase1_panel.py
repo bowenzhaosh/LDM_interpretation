@@ -60,6 +60,29 @@ LABEL_ARRAYS = (
 COVARIANCE_SYMMETRY_RTOL = 4.0 * np.finfo(np.float64).eps
 
 
+def _covariance_symmetry_diagnostics(sigmas: np.ndarray) -> dict[str, float]:
+    if sigmas.ndim != 3 or sigmas.shape[1:] != (4, 4):
+        raise RuntimeError("covariance symmetry input shape mismatch")
+    transposed = sigmas.transpose(0, 2, 1)
+    asymmetry = np.abs(sigmas - transposed)
+    symmetry_scale = np.maximum(np.abs(sigmas), np.abs(transposed))
+    relative_asymmetry = np.divide(
+        asymmetry,
+        symmetry_scale,
+        out=np.zeros_like(asymmetry),
+        where=symmetry_scale > 0.0,
+    )
+    if np.any(asymmetry > COVARIANCE_SYMMETRY_RTOL * symmetry_scale):
+        raise RuntimeError(
+            "generated covariance exceeds the float64 symmetry roundoff bound"
+        )
+    return {
+        "covariance_symmetry_rtol": float(COVARIANCE_SYMMETRY_RTOL),
+        "covariance_max_abs_asymmetry": float(np.max(asymmetry)),
+        "covariance_max_relative_asymmetry": float(np.max(relative_asymmetry)),
+    }
+
+
 def _digest_rows(arrays: dict[str, np.ndarray], names: tuple[str, ...]) -> np.ndarray:
     count = len(arrays[names[0]])
     result = np.empty((count, 32), dtype=np.uint8)
@@ -163,19 +186,7 @@ def _validate_stream(
         if not np.isfinite(stream[name]).all():
             raise RuntimeError(f"non-finite generated stream array: {name}")
     sigmas = stream["sigmas"]
-    transposed = sigmas.transpose(0, 2, 1)
-    asymmetry = np.abs(sigmas - transposed)
-    symmetry_scale = np.maximum(np.abs(sigmas), np.abs(transposed))
-    relative_asymmetry = np.divide(
-        asymmetry,
-        symmetry_scale,
-        out=np.zeros_like(asymmetry),
-        where=symmetry_scale > 0.0,
-    )
-    if np.any(asymmetry > COVARIANCE_SYMMETRY_RTOL * symmetry_scale):
-        raise RuntimeError(
-            "generated covariance exceeds the float64 symmetry roundoff bound"
-        )
+    covariance_diagnostics = _covariance_symmetry_diagnostics(sigmas)
     if np.any(np.linalg.eigvalsh(stream["sigmas"])[:, 0] <= 0.0):
         raise RuntimeError("generated covariance is not positive definite")
     if not np.all(fleet.validity_keep(stream["sigmas"])):
@@ -189,11 +200,7 @@ def _validate_stream(
         (expected_bins < 0) | (expected_bins >= 100)
     ):
         raise RuntimeError("generated native bin is outside [0,99]")
-    return {
-        "covariance_symmetry_rtol": float(COVARIANCE_SYMMETRY_RTOL),
-        "covariance_max_abs_asymmetry": float(np.max(asymmetry)),
-        "covariance_max_relative_asymmetry": float(np.max(relative_asymmetry)),
-    }
+    return covariance_diagnostics
 
 
 def build_panel(

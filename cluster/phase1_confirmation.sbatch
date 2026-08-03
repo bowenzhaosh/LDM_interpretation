@@ -135,7 +135,7 @@ elif [[ "${PHASE1_MODE}" == "verify" ]]; then
   run_locked_module pfn_dag_verify.phase1_confirmation_verify \
     --root "${PHASE1_ATTEMPT_ROOT}/join" --repo "${PHASE1_ROOT}" \
     --commit "${PHASE1_SOURCE_COMMIT}" \
-    --attempt-tag phase1-ordering-confirmation-v1-fix1 \
+    --attempt-tag phase1-ordering-confirmation-v1-fix2 \
     --out "${PHASE1_STAGE_OUT}/independent_verification.json"
 else
   usage

@@ -7,9 +7,10 @@ This directory preserves the second production attempt at source commit
 The repaired panel stage completed and sealed all 6,402 context rows. PFN job
 `160021` then failed its label-free replay guard on the first frozen
 checkpoint, before writing a prediction shard. The guard compared batch-64
-inference with singleton and reverse-order batching. Its registered
-`1e-6`-nat tolerance was smaller than ordinary float32 kernel-shape roundoff.
-No joined endpoint or scientific decision was computed.
+inference with singleton and reverse-order batching. The observed mismatch
+exceeded its registered `1e-6`-nat tolerance and was later found to be
+consistent with bounded float32 kernel-shape roundoff. No joined endpoint or
+scientific decision was computed.
 
 The three oracle shards had started in parallel after the panel. They were
 cancelled immediately once the PFN failure was confirmed so a doomed join did
@@ -36,7 +37,7 @@ TF32 flags and cuDNN benchmarking were disabled. Across this locked sweep:
 - maximum singleton/reverse batch log-probability error was
   `2.6702880859375e-5` nats;
 - maximum context-roll log-probability error was `1.9073486328125e-5` nats;
-- maximum probability error was `2.17098238802782e-7`;
+- maximum probability error was `2.9785406344129406e-7`;
 - maximum total variation was `5.504126464169025e-7`.
 
 Job `160041` then evaluated every one of the 3,201 saved panel rows for every
@@ -64,3 +65,8 @@ not run the diagnostic.
 diagnostic sources, terminal receipt, and Slurm accounting are retained here.
 Runtime bytecode caches are omitted because they are neither source nor
 scientific output; the remote attempt remains unchanged.
+
+`DIAGNOSTIC_SUBMISSIONS.json` maps each post-failure job to its reconstructed
+Slurm submit line, source paths and hashes, logs, runtime-lock status, and
+embedded identity. The exact node-local sbatch submitted for failed staging
+job `160027` is unavailable and is explicitly marked as such.

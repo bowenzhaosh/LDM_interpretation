@@ -3,16 +3,50 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from pfn_dag_verify.phase1_join import (
     _bootstrap,
     _decide,
     _nested_half_gate,
     _point_estimates,
+    _validate_panel_covariances,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _AlwaysValidFleet:
+    @staticmethod
+    def validity_keep(sigmas):
+        return np.ones(len(sigmas), dtype=bool)
+
+
+def test_join_accepts_registered_float64_covariance_roundoff_without_mutation():
+    sigmas = np.repeat(np.eye(4, dtype=np.float64)[None, :, :], 2, axis=0)
+    sigmas[0, 0, 1] = 0.2
+    sigmas[0, 1, 0] = np.nextafter(0.2, np.inf)
+    before = sigmas.copy()
+
+    _validate_panel_covariances(_AlwaysValidFleet(), sigmas, "fixture")
+
+    np.testing.assert_array_equal(sigmas, before)
+
+
+def test_join_rejects_material_or_zero_to_nonzero_covariance_asymmetry():
+    material = np.eye(4, dtype=np.float64)[None, :, :]
+    material[0, 0, 1] = 0.2
+    material[0, 1, 0] = 0.2000001
+    with pytest.raises(RuntimeError, match="symmetry roundoff bound"):
+        _validate_panel_covariances(_AlwaysValidFleet(), material, "material")
+
+    zero_to_nonzero = np.eye(4, dtype=np.float64)[None, :, :]
+    zero_to_nonzero[0, 0, 1] = np.nextafter(0.0, np.inf)
+    with pytest.raises(RuntimeError, match="symmetry roundoff bound"):
+        _validate_panel_covariances(
+            _AlwaysValidFleet(), zero_to_nonzero, "zero-to-nonzero"
+        )
 
 
 def _config():
@@ -137,7 +171,7 @@ def test_decision_truth_table_and_strict_effect_boundary():
         causal_change=-0.008,
     )
     boundary = _decide(points, bootstrap, {"pass": True}, config, mechanical)
-    assert boundary["decision"] == "NOT_REPLICATED_ORDERING_USE"
+    assert boundary["decision"] == "INCONCLUSIVE_PHASE1_NUMERICAL_CLEARANCE"
 
     invalid = _decide(points, bootstrap, {"pass": False}, config, mechanical)
     assert invalid["decision"] == "INCONCLUSIVE_PHASE1_INSTRUMENT"
@@ -157,11 +191,18 @@ def test_decision_stops_inside_the_registered_numerical_clearance_band():
     assert result["decision"] == "INCONCLUSIVE_PHASE1_NUMERICAL_CLEARANCE"
     assert result["numerical_clearance"] == {
         "effect_floor": -0.008,
-        "clearance_nats": 0.001,
+        "oracle_clearance_nats": 0.001,
         "clearance_boundary": -0.009000000000000001,
         "rejection_boundary": -0.007,
+        "pfn_replay_bounds": {
+            "single_pfn_nll": 8e-5,
+            "direct_deficit_or_gap": 8e-5,
+            "causal_minus_control_delta": 1.6e-4,
+            "direct_checkpoint_change": 1.6e-4,
+            "delta_difference_in_differences": 3.2e-4,
+        },
         "borderline_action": (
-            "stop_without_claim_and_run_registered_higher_fidelity_oracle"
+            "stop_without_claim_and_increase_numeric_fidelity_or_replay_stability"
         ),
     }
     assert result["delta_by_checkpoint"]["120000"]["passes_effect_floor"] is True
@@ -186,13 +227,82 @@ def test_decision_stops_inside_the_registered_numerical_clearance_band():
     assert near_negative["decision"] == "INCONCLUSIVE_PHASE1_NUMERICAL_CLEARANCE"
 
     points, bootstrap = _decision_inputs(
-        final=-0.0069,
+        final=-0.0068,
         change=-0.010,
-        causal_final=-0.0069,
+        causal_final=-0.0068,
         causal_change=-0.010,
     )
     clear_negative = _decide(points, bootstrap, {"pass": True}, config, mechanical)
     assert clear_negative["decision"] == "NOT_REPLICATED_ORDERING_USE"
+
+
+def test_primary_requires_endpoint_specific_replay_margin():
+    config = _config()
+    mechanical = {"mechanical": True}
+
+    points, bootstrap = _decision_inputs(
+        final=-0.00912,
+        change=-0.010,
+        causal_final=-0.00912,
+        causal_change=-0.010,
+    )
+    delta_inside_replay_band = _decide(
+        points, bootstrap, {"pass": True}, config, mechanical
+    )
+    assert (
+        delta_inside_replay_band["decision"]
+        == "INCONCLUSIVE_PHASE1_NUMERICAL_CLEARANCE"
+    )
+    assert (
+        delta_inside_replay_band["deficit_by_prior_and_checkpoint"]["C"]["120000"][
+            "passes_direct_rule"
+        ]
+        is True
+    )
+    assert (
+        delta_inside_replay_band["delta_by_checkpoint"]["120000"]["passes_rule"]
+        is False
+    )
+
+    points, bootstrap = _decision_inputs(
+        final=-0.00918,
+        change=-0.010,
+        causal_final=-0.00918,
+        causal_change=-0.010,
+    )
+    beyond_replay_band = _decide(points, bootstrap, {"pass": True}, config, mechanical)
+    assert beyond_replay_band["decision"] == "REPLICATED_ORDERING_USE"
+
+    points, bootstrap = _decision_inputs(
+        final=-0.006975,
+        change=-0.010,
+        causal_final=-0.006975,
+        causal_change=-0.010,
+    )
+    negative_inside_replay_band = _decide(
+        points, bootstrap, {"pass": True}, config, mechanical
+    )
+    assert (
+        negative_inside_replay_band["decision"]
+        == "INCONCLUSIVE_PHASE1_NUMERICAL_CLEARANCE"
+    )
+
+
+def test_secondary_reports_replay_sensitive_checkpoint_change():
+    config = _config()
+    points, bootstrap = _decision_inputs(
+        final=-0.010,
+        early=0.0,
+        change=-0.00815,
+        causal_final=-0.010,
+        causal_early=0.0,
+        causal_change=-0.00805,
+    )
+    result = _decide(points, bootstrap, {"pass": True}, config, {"mechanical": True})
+    assert result["primary"] == "REPLICATED_ORDERING_USE"
+    assert result["secondary"] == "INCONCLUSIVE_UNDERTRAINING_REPLAY_SENSITIVITY"
+    assert result["deficit_change_final_minus_early"]["C"]["replay_sensitive"]
+    assert result["delta_change_final_minus_early"]["replay_sensitive"]
 
 
 def test_primary_requires_both_direct_and_control_subtracted_clearance():
@@ -356,7 +466,9 @@ def test_undertraining_uses_nominal_early_and_change_rules():
     assert strict_change["secondary"] == "NOT_SUPPORTED_UNDERTRAINING_CLAIM"
 
 
-def _nested_half_rows(d_c: float, d_n: float) -> dict[str, np.ndarray]:
+def _nested_half_rows(
+    d_c: float, d_n: float, fixed_fleet_gap: float = 0.1
+) -> dict[str, np.ndarray]:
     config = _config()
     prior_code = np.repeat(np.arange(2, dtype=np.int64), 200)
     stream_index = np.tile(np.arange(200, dtype=np.int64), 2)
@@ -375,7 +487,7 @@ def _nested_half_rows(d_c: float, d_n: float) -> dict[str, np.ndarray]:
         "oracle_ablated_nll": d,
         "oracle_half_full_nll": oracle_half_full,
         "oracle_full_nll": oracle_full,
-        "pfn_final_nll": np.full((400, 3), 0.1, dtype=np.float64),
+        "pfn_final_nll": np.full((400, 3), fixed_fleet_gap, dtype=np.float64),
     }
 
 
@@ -395,6 +507,19 @@ def test_nested_half_gate_bounds_direct_and_control_subtracted_bank_error():
     assert control_subtracted_bias["ablated_change_difference_pass"] is False
     assert control_subtracted_bias["pass"] is False
 
+    replay_sensitive_gap = _nested_half_gate(
+        _nested_half_rows(0.0001, 0.0, fixed_fleet_gap=4e-5), config
+    )
+    assert (
+        replay_sensitive_gap["priors"]["C"]["fixed_fleet_final_gap_one_sided_95_lower"]
+        > 0.0
+    )
+    assert (
+        replay_sensitive_gap["priors"]["C"]["replay_robust_gap_one_sided_95_lower"]
+        < 0.0
+    )
+    assert replay_sensitive_gap["pass"] is False
+
 
 def test_oracle_dependent_validity_boundaries_use_numerical_clearance():
     config = _config()
@@ -407,6 +532,23 @@ def test_oracle_dependent_validity_boundaries_use_numerical_clearance():
     assert kl_borderline["decision"] == "INCONCLUSIVE_PHASE1_INSTRUMENT"
     assert kl_borderline["kl_alarm"]["C"]["numerically_borderline"] is True
     assert kl_borderline["validity_gates"]["kl_alarm_clear"] is False
+
+    points, bootstrap = _decision_inputs()
+    bootstrap["gap_final"][0] = -0.00296
+    points["gap_final"][0] = -0.00296
+    replay_borderline = _decide(
+        points, bootstrap, {"pass": True}, config, {"mechanical": True}
+    )
+    assert replay_borderline["kl_alarm"]["C"]["clear"] is False
+    assert replay_borderline["kl_alarm"]["C"]["numerically_borderline"] is True
+
+    points, bootstrap = _decision_inputs()
+    bootstrap["gap_final"][0] = -0.00290
+    points["gap_final"][0] = -0.00290
+    replay_cleared = _decide(
+        points, bootstrap, {"pass": True}, config, {"mechanical": True}
+    )
+    assert replay_cleared["kl_alarm"]["C"]["clear"] is True
 
     points, bootstrap = _decision_inputs()
     bootstrap["ordering_value"][0] = 0.0009

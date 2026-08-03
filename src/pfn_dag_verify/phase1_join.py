@@ -23,13 +23,32 @@ from .phase1_confirm_common import (
 )
 from .phase1_oracle_confirm import ORACLE_ARRAYS
 from .phase1_ordering import load_fleet_module
-from .phase1_panel import INPUT_ARRAYS, LABEL_ARRAYS, ROW_KEYS, _digest_rows
-from .phase1_pfn import PREDICTION_ARRAYS
+from .phase1_panel import (
+    INPUT_ARRAYS,
+    LABEL_ARRAYS,
+    ROW_KEYS,
+    _covariance_symmetry_diagnostics,
+    _digest_rows,
+)
+from .phase1_pfn import (
+    PREDICTION_ARRAYS,
+    REPLAY_BATCH_COMPARISONS,
+    REPLAY_COMPARISONS,
+    REPLAY_COMBINED_COMPARISONS,
+    REPLAY_CONTEXT_COMPARISONS,
+    REPLAY_EXACT_COMPARISONS,
+)
 from .storage import write_json_atomic, write_numeric_npz_atomic
 
 
 MODEL_SEEDS = np.array([0, 1, 2], dtype=np.int64)
 CHECKPOINT_STEPS = np.array([20_000, 60_000, 120_000], dtype=np.int64)
+
+
+def _validate_panel_covariances(fleet: Any, sigmas: np.ndarray, name: str) -> None:
+    _covariance_symmetry_diagnostics(sigmas)
+    if not np.all(fleet.validity_keep(sigmas)):
+        raise RuntimeError(f"panel covariance validity failure: {name}")
 
 
 def _load_npz(path: Path, schema: tuple[str, ...]) -> dict[str, np.ndarray]:
@@ -143,15 +162,134 @@ def _verify_pfn_root(
     }
     if not isinstance(replay, dict) or set(replay) != expected_replay:
         raise RuntimeError("PFN replay inventory mismatch")
-    if not all(
-        row.get("pass") is True and row.get("rows") == 72 for row in replay.values()
-    ):
-        raise RuntimeError("PFN replay guard did not pass for every checkpoint")
+    metric_names = {
+        "bit_identical",
+        "max_abs_logp_error",
+        "max_abs_probability_error",
+        "max_total_variation",
+    }
     for row in replay.values():
-        if float(row["singleton_and_reverse_batch_max_abs_logp_error"]) > float(
-            config["pfn_batch_logp_atol"]
-        ) or float(row["context_roll_max_abs_logp_error"]) > float(
-            config["pfn_context_permutation_logp_atol"]
+        if set(row) != {
+            "stress_rows",
+            "full_panel_rows",
+            "full_panel_shards",
+            "comparisons",
+            "exact_controls_pass",
+            "batch_max_abs_logp_error",
+            "context_max_abs_logp_error",
+            "combined_max_abs_logp_error",
+            "approximate_max_abs_probability_error",
+            "approximate_max_total_variation",
+            "pass",
+        }:
+            raise RuntimeError("PFN replay record schema mismatch")
+        if (
+            row.get("pass") is not True
+            or row.get("exact_controls_pass") is not True
+            or row.get("stress_rows") != 72
+            or row.get("full_panel_rows") != 3201
+        ):
+            raise RuntimeError("PFN replay guard did not pass for every checkpoint")
+        comparisons = row.get("comparisons")
+        if not isinstance(comparisons, dict) or set(comparisons) != set(
+            REPLAY_COMPARISONS
+        ):
+            raise RuntimeError("PFN replay comparison inventory mismatch")
+        for name, comparison in comparisons.items():
+            if not isinstance(comparison, dict) or set(comparison) != metric_names:
+                raise RuntimeError("PFN replay comparison metric schema mismatch")
+            if not all(
+                np.isfinite(float(comparison[metric]))
+                and float(comparison[metric]) >= 0.0
+                for metric in metric_names - {"bit_identical"}
+            ):
+                raise RuntimeError("PFN replay comparison metric is invalid")
+            if name in REPLAY_EXACT_COMPARISONS and (
+                comparison["bit_identical"] is not True
+                or any(
+                    float(comparison[metric]) != 0.0
+                    for metric in metric_names - {"bit_identical"}
+                )
+            ):
+                raise RuntimeError("PFN exact replay control is not bit-identical")
+        full_panel_names = {
+            name.removeprefix("full_panel_")
+            for name in REPLAY_COMPARISONS
+            if name.startswith("full_panel_")
+        }
+        full_panel_shards = row.get("full_panel_shards")
+        if not isinstance(full_panel_shards, list) or len(full_panel_shards) != 9:
+            raise RuntimeError("PFN full-panel replay shard inventory mismatch")
+        if (
+            {int(shard.get("shard_index", -1)) for shard in full_panel_shards}
+            != set(range(9))
+            or sum(int(shard.get("rows", -1)) for shard in full_panel_shards) != 3201
+            or {int(shard.get("rows", -1)) for shard in full_panel_shards} != {355, 356}
+        ):
+            raise RuntimeError("PFN full-panel replay row inventory mismatch")
+        for name in full_panel_names:
+            shard_metrics = []
+            for shard in full_panel_shards:
+                shard_comparisons = shard.get("comparisons")
+                if (
+                    not isinstance(shard_comparisons, dict)
+                    or set(shard_comparisons) != full_panel_names
+                ):
+                    raise RuntimeError("PFN full-panel comparison inventory mismatch")
+                metric = shard_comparisons[name]
+                if not isinstance(metric, dict) or set(metric) != metric_names:
+                    raise RuntimeError("PFN full-panel comparison schema mismatch")
+                shard_metrics.append(metric)
+            aggregate = comparisons[f"full_panel_{name}"]
+            if bool(aggregate["bit_identical"]) != all(
+                bool(metric["bit_identical"]) for metric in shard_metrics
+            ) or any(
+                float(aggregate[metric_name])
+                != max(float(metric[metric_name]) for metric in shard_metrics)
+                for metric_name in metric_names - {"bit_identical"}
+            ):
+                raise RuntimeError("PFN full-panel replay aggregate mismatch")
+        batch_max = max(
+            float(comparisons[name]["max_abs_logp_error"])
+            for name in REPLAY_BATCH_COMPARISONS
+        )
+        context_max = max(
+            float(comparisons[name]["max_abs_logp_error"])
+            for name in REPLAY_CONTEXT_COMPARISONS
+        )
+        combined_max = max(
+            float(comparisons[name]["max_abs_logp_error"])
+            for name in REPLAY_COMBINED_COMPARISONS
+        )
+        approximate = (
+            *REPLAY_BATCH_COMPARISONS,
+            *REPLAY_CONTEXT_COMPARISONS,
+            *REPLAY_COMBINED_COMPARISONS,
+        )
+        probability_max = max(
+            float(comparisons[name]["max_abs_probability_error"])
+            for name in approximate
+        )
+        total_variation_max = max(
+            float(comparisons[name]["max_total_variation"]) for name in approximate
+        )
+        if not all(
+            (
+                float(row["batch_max_abs_logp_error"]) == batch_max,
+                float(row["context_max_abs_logp_error"]) == context_max,
+                float(row["combined_max_abs_logp_error"]) == combined_max,
+                float(row["approximate_max_abs_probability_error"]) == probability_max,
+                float(row["approximate_max_total_variation"]) == total_variation_max,
+            )
+        ):
+            raise RuntimeError("PFN replay aggregate does not match its comparisons")
+        if (
+            batch_max > float(config["pfn_batch_logp_atol"])
+            or context_max > float(config["pfn_context_permutation_logp_atol"])
+            or combined_max
+            > float(config["pfn_combined_context_batch_logp_atol"])
+            or probability_max > float(config["pfn_replay_probability_atol"])
+            or total_variation_max > float(config["pfn_replay_total_variation_atol"])
         ):
             raise RuntimeError("PFN replay summary exceeds a frozen tolerance")
     registry_path = (repo_root() / str(config["checkpoint_registry"])).resolve()
@@ -345,13 +483,7 @@ def _load_joined_rows(
                     (labels["true_orderings"] < 0) | (labels["true_orderings"] >= 24)
                 ):
                     raise RuntimeError(f"panel ordering label is invalid: {name}")
-                if not np.allclose(
-                    labels["sigmas"],
-                    labels["sigmas"].transpose(0, 2, 1),
-                    rtol=0,
-                    atol=0,
-                ) or not np.all(fleet.validity_keep(labels["sigmas"])):
-                    raise RuntimeError(f"panel covariance validity failure: {name}")
+                _validate_panel_covariances(fleet, labels["sigmas"], name)
                 if np.any(filled[row_ids]):
                     raise RuntimeError("duplicate panel row ID")
                 filled[row_ids] = 1
@@ -811,6 +943,7 @@ def _nested_half_gate(
     fraction_limit = float(
         config["gates"]["full_oracle_half_change_fraction_of_positive_gap_max"]
     )
+    replay_bound = float(config["pfn_combined_context_batch_logp_atol"])
     for prior_code, prior in enumerate(("C", "N")):
         mask = half["prior_code"] == prior_code
         if int(mask.sum()) != 200:
@@ -829,6 +962,7 @@ def _nested_half_gate(
         d_ci = _interval(bootstrap["d"][prior_code])
         e_ci = _interval(bootstrap["e"][prior_code])
         g_lower = float(np.quantile(bootstrap["g"][prior_code], 0.05, method="linear"))
+        replay_robust_g_lower = g_lower - replay_bound
         e_ci_abs_max = max(abs(e_ci[0]), abs(e_ci[1]))
         d_values[prior] = d
         reports[prior] = {
@@ -838,12 +972,14 @@ def _nested_half_gate(
             "full_full_minus_half_ci95": e_ci,
             "fixed_fleet_final_gap": g,
             "fixed_fleet_final_gap_one_sided_95_lower": g_lower,
-            "positive_gap": g_lower > 0.0,
+            "pfn_single_nll_replay_bound": replay_bound,
+            "replay_robust_gap_one_sided_95_lower": replay_robust_g_lower,
+            "positive_gap": replay_robust_g_lower > 0.0,
             "full_change_fraction": abs(e) / g if g > 0.0 else None,
             "full_predictive_pass": bool(
-                g_lower > 0.0
+                replay_robust_g_lower > 0.0
                 and e_ci_abs_max < full_limit
-                and e_ci_abs_max < fraction_limit * g_lower
+                and e_ci_abs_max < fraction_limit * replay_robust_g_lower
             ),
         }
     difference = abs(d_values["C"] - d_values["N"])
@@ -888,6 +1024,14 @@ def _decide(
     numerical_clearance = float(gates["primary_numerical_clearance"])
     clearance_boundary = effect_floor - numerical_clearance
     rejection_boundary = effect_floor + numerical_clearance
+    replay_epsilon = float(config["pfn_combined_context_batch_logp_atol"])
+    replay_bounds = {
+        "single_pfn_nll": replay_epsilon,
+        "direct_deficit_or_gap": replay_epsilon,
+        "causal_minus_control_delta": 2.0 * replay_epsilon,
+        "direct_checkpoint_change": 2.0 * replay_epsilon,
+        "delta_difference_in_differences": 4.0 * replay_epsilon,
+    }
     if numerical_clearance <= 0.0:
         raise RuntimeError("primary numerical clearance must be positive")
     v_c_lower = float(
@@ -910,8 +1054,8 @@ def _decide(
     kl_clear_boundary = kl_threshold + numerical_clearance
     for prior_code, prior in enumerate(("C", "N")):
         ci = _interval(bootstrap["gap_final"][prior_code])
-        alarm = ci[1] < kl_alarm_boundary
-        clear = ci[1] >= kl_clear_boundary
+        alarm = kl_alarm_boundary - ci[1] > replay_bounds["direct_deficit_or_gap"]
+        clear = ci[1] - kl_clear_boundary > replay_bounds["direct_deficit_or_gap"]
         gap_reports[prior] = {
             "point": float(points["gap_final"][prior_code]),
             "ci95": ci,
@@ -920,6 +1064,7 @@ def _decide(
             "clear": clear,
             "alarm_boundary": kl_alarm_boundary,
             "clear_boundary": kl_clear_boundary,
+            "pfn_replay_bound": replay_bounds["direct_deficit_or_gap"],
         }
         kl_gate = kl_gate and clear
     validity_gates = {
@@ -936,6 +1081,8 @@ def _decide(
         for prior_code, prior in enumerate(("C", "N")):
             deficit_point = float(points["deficit"][prior_code, index])
             deficit_ci = _interval(bootstrap["deficit"][prior_code, index])
+            decision_endpoint = max(deficit_point, deficit_ci[1])
+            endpoint_replay_bound = replay_bounds["direct_deficit_or_gap"]
             passes_effect_floor = bool(
                 prior == "C"
                 and deficit_point < effect_floor
@@ -943,57 +1090,87 @@ def _decide(
             )
             passes_clearance = bool(
                 prior == "C"
-                and deficit_point < clearance_boundary
-                and deficit_ci[1] < clearance_boundary
+                and clearance_boundary - decision_endpoint > endpoint_replay_bound
             )
-            decision_endpoint = max(deficit_point, deficit_ci[1])
+            clearly_fails = bool(
+                prior == "C"
+                and decision_endpoint - rejection_boundary > endpoint_replay_bound
+            )
             deficit_reports[prior][str(step)] = {
                 "point": deficit_point,
                 "ci95": deficit_ci,
                 "passes_effect_floor": passes_effect_floor,
                 "passes_direct_rule": passes_clearance,
+                "pfn_replay_bound": endpoint_replay_bound,
+                "distance_beyond_positive_boundary": (
+                    clearance_boundary - decision_endpoint
+                ),
+                "distance_beyond_rejection_boundary": (
+                    decision_endpoint - rejection_boundary
+                ),
                 "numerically_borderline": bool(
-                    prior == "C"
-                    and clearance_boundary <= decision_endpoint < rejection_boundary
+                    prior == "C" and not passes_clearance and not clearly_fails
                 ),
-                "clearly_fails_effect_rule": bool(
-                    prior == "C" and decision_endpoint >= rejection_boundary
-                ),
+                "clearly_fails_effect_rule": clearly_fails,
             }
         point = float(points["delta"][index])
         ci = _interval(bootstrap["delta"][index])
+        decision_endpoint = max(point, ci[1])
+        endpoint_replay_bound = replay_bounds["causal_minus_control_delta"]
         passes_effect_floor = bool(point < effect_floor and ci[1] < effect_floor)
         passes_clearance = bool(
-            point < clearance_boundary and ci[1] < clearance_boundary
+            clearance_boundary - decision_endpoint > endpoint_replay_bound
         )
-        decision_endpoint = max(point, ci[1])
+        clearly_fails = bool(
+            decision_endpoint - rejection_boundary > endpoint_replay_bound
+        )
         delta_reports[str(step)] = {
             "point": point,
             "ci95": ci,
             "passes_effect_floor": passes_effect_floor,
             "passes_rule": passes_clearance,
-            "numerically_borderline": bool(
-                clearance_boundary <= decision_endpoint < rejection_boundary
+            "pfn_replay_bound": endpoint_replay_bound,
+            "distance_beyond_positive_boundary": (
+                clearance_boundary - decision_endpoint
             ),
-            "clearly_fails_effect_rule": bool(decision_endpoint >= rejection_boundary),
+            "distance_beyond_rejection_boundary": (
+                decision_endpoint - rejection_boundary
+            ),
+            "numerically_borderline": bool(not passes_clearance and not clearly_fails),
+            "clearly_fails_effect_rule": clearly_fails,
         }
     for prior_code, prior in enumerate(("C", "N")):
         point = float(points["deficit_change_final_minus_early"][prior_code])
         ci = _interval(bootstrap["deficit_change_final_minus_early"][prior_code])
+        decision_endpoint = max(point, ci[1])
+        endpoint_replay_bound = replay_bounds["direct_checkpoint_change"]
         passes_effect_floor = bool(
             prior == "C" and point < effect_floor and ci[1] < effect_floor
+        )
+        passes_replay_margin = bool(
+            prior == "C" and effect_floor - decision_endpoint > endpoint_replay_bound
         )
         deficit_change_reports[prior] = {
             "point": point,
             "ci95": ci,
             "passes_effect_floor": passes_effect_floor,
             # The identical ablated-oracle row cancels between checkpoints.
-            "passes_direct_change_rule": passes_effect_floor,
+            "passes_direct_change_rule": passes_replay_margin,
+            "pfn_replay_bound": endpoint_replay_bound,
+            "distance_beyond_effect_floor": effect_floor - decision_endpoint,
+            "replay_sensitive": bool(
+                prior == "C" and passes_effect_floor and not passes_replay_margin
+            ),
         }
     change_point = float(points["delta_change_final_minus_early"])
     change_ci = _interval(bootstrap["delta_change_final_minus_early"])
     change_passes_effect_floor = bool(
         change_point < effect_floor and change_ci[1] < effect_floor
+    )
+    change_endpoint = max(change_point, change_ci[1])
+    change_replay_bound = replay_bounds["delta_difference_in_differences"]
+    change_passes_replay_margin = bool(
+        effect_floor - change_endpoint > change_replay_bound
     )
     if not all_valid:
         primary = "NOT_EVALUATED"
@@ -1015,18 +1192,30 @@ def _decide(
         else:
             primary = "INCONCLUSIVE_PHASE1_NUMERICAL_CLEARANCE"
         change_pass = bool(
-            deficit_change_reports["C"]["passes_effect_floor"]
-            and change_passes_effect_floor
+            deficit_change_reports["C"]["passes_direct_change_rule"]
+            and change_passes_replay_margin
         )
         early_clear_failure = bool(
             deficit_reports["C"]["20000"]["clearly_fails_effect_rule"]
             or delta_reports["20000"]["clearly_fails_effect_rule"]
         )
         secondary_pass = bool(final_pass and early_clear_failure and change_pass)
+        early_nominal_clear_failure = bool(
+            deficit_reports["C"]["20000"]["distance_beyond_rejection_boundary"] > 0.0
+            or delta_reports["20000"]["distance_beyond_rejection_boundary"] > 0.0
+        )
+        nominal_secondary_components = bool(
+            final_pass
+            and early_nominal_clear_failure
+            and deficit_change_reports["C"]["passes_effect_floor"]
+            and change_passes_effect_floor
+        )
         if primary == "INCONCLUSIVE_PHASE1_NUMERICAL_CLEARANCE":
             secondary = "NOT_EVALUATED_PRIMARY_NUMERICALLY_UNCLEARED"
         elif secondary_pass:
             secondary = "SUPPORTED_UNDERTRAINING_CAN_OBSCURE_ORDERING_ADVANTAGE"
+        elif nominal_secondary_components:
+            secondary = "INCONCLUSIVE_UNDERTRAINING_REPLAY_SENSITIVITY"
         else:
             secondary = "NOT_SUPPORTED_UNDERTRAINING_CLAIM"
         decision = primary
@@ -1053,14 +1242,22 @@ def _decide(
             "ci95": change_ci,
             "passes_effect_floor": change_passes_effect_floor,
             # The same full/ablated oracle rows cancel in this checkpoint change.
-            "passes_rule": change_passes_effect_floor,
+            "passes_rule": change_passes_replay_margin,
+            "pfn_replay_bound": change_replay_bound,
+            "distance_beyond_effect_floor": effect_floor - change_endpoint,
+            "replay_sensitive": bool(
+                change_passes_effect_floor and not change_passes_replay_margin
+            ),
         },
         "numerical_clearance": {
             "effect_floor": effect_floor,
-            "clearance_nats": numerical_clearance,
+            "oracle_clearance_nats": numerical_clearance,
             "clearance_boundary": clearance_boundary,
             "rejection_boundary": rejection_boundary,
-            "borderline_action": "stop_without_claim_and_run_registered_higher_fidelity_oracle",
+            "pfn_replay_bounds": replay_bounds,
+            "borderline_action": (
+                "stop_without_claim_and_increase_numeric_fidelity_or_replay_stability"
+            ),
         },
     }
 

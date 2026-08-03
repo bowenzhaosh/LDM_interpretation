@@ -41,6 +41,44 @@ PREDICTION_ARRAYS = (
     "checkpoint_step",
     "log_probability",
 )
+REPLAY_EXACT_COMPARISONS = (
+    "stress_repeat",
+    "stress_same_shape_block_permutation",
+    "stress_fixed_shape_companion_replacement",
+    "stress_fixed_shape_focal_relocation",
+    "stress_remainder_35",
+    "stress_remainder_36",
+    "stress_remainder_43",
+    "full_panel_repeat",
+    "full_panel_reverse",
+    "full_panel_same_shape_block_permutation",
+    "full_panel_random_permutation_1",
+    "full_panel_random_permutation_2",
+)
+REPLAY_CONTEXT_COMPARISONS = (
+    "stress_context_roll_view",
+    "stress_context_roll_contiguous",
+    "full_panel_context_roll_view",
+    "full_panel_context_roll_contiguous",
+)
+REPLAY_BATCH_COMPARISONS = (
+    "stress_singleton",
+    "stress_batch_8",
+    "stress_reverse",
+    "full_panel_batch_8",
+)
+REPLAY_COMBINED_COMPARISONS = (
+    "stress_context_roll_view_batch_8",
+    "stress_context_roll_contiguous_batch_8",
+    "full_panel_context_roll_view_batch_8",
+    "full_panel_context_roll_contiguous_batch_8",
+)
+REPLAY_COMPARISONS = (
+    *REPLAY_EXACT_COMPARISONS,
+    *REPLAY_CONTEXT_COMPARISONS,
+    *REPLAY_BATCH_COMPARISONS,
+    *REPLAY_COMBINED_COMPARISONS,
+)
 
 
 def _load_model_module(path: Path) -> ModuleType:
@@ -254,34 +292,330 @@ def _replay_guard(
     shards: list[dict[str, np.ndarray]],
     config: dict[str, Any],
     device: torch.device,
-) -> dict[str, float | int | bool]:
+) -> dict[str, Any]:
+    if model.training:
+        raise RuntimeError("PFN replay requires evaluation mode")
+    if any(
+        module.p != 0.0
+        for module in model.modules()
+        if isinstance(module, torch.nn.Dropout)
+    ):
+        raise RuntimeError("PFN replay requires zero dropout")
+
+    def compare(left: np.ndarray, right: np.ndarray) -> dict[str, float | bool]:
+        if left.shape != right.shape or not (
+            np.isfinite(left).all() and np.isfinite(right).all()
+        ):
+            raise RuntimeError("PFN replay comparison shape or finiteness failure")
+        logp_error = np.abs(left - right)
+        probability_error = np.abs(np.exp(left) - np.exp(right))
+        return {
+            "bit_identical": bool(np.array_equal(left, right)),
+            "max_abs_logp_error": float(np.max(logp_error)),
+            "max_abs_probability_error": float(np.max(probability_error)),
+            "max_total_variation": float(
+                0.5 * np.max(np.sum(probability_error, axis=1))
+            ),
+        }
+
+    def merge(items: list[dict[str, float | bool]]) -> dict[str, float | bool]:
+        if not items:
+            raise RuntimeError("PFN replay comparison inventory is empty")
+        return {
+            "bit_identical": bool(all(bool(item["bit_identical"]) for item in items)),
+            "max_abs_logp_error": max(
+                float(item["max_abs_logp_error"]) for item in items
+            ),
+            "max_abs_probability_error": max(
+                float(item["max_abs_probability_error"]) for item in items
+            ),
+            "max_total_variation": max(
+                float(item["max_total_variation"]) for item in items
+            ),
+        }
+
     take = int(config["pfn_replay_rows_per_stratum"])
     contexts = np.concatenate([shard["contexts"][:take] for shard in shards])
     queries = np.concatenate([shard["queries"][:take] for shard in shards])
     batch_size = int(config["pfn_batch_size"])
     batched = _infer(model, contexts, queries, batch_size, device)
+    repeated = _infer(model, contexts, queries, batch_size, device)
     singleton = _infer(model, contexts, queries, 1, device)
+    batch_8 = _infer(model, contexts, queries, 8, device)
     reverse = np.arange(len(contexts) - 1, -1, -1)
     reversed_output = _infer(
         model, contexts[reverse], queries[reverse], batch_size, device
     )[reverse]
     permutation = np.roll(np.arange(30), int(config["pfn_context_permutation_roll"]))
-    permuted = _infer(model, contexts[:, permutation], queries, batch_size, device)
-    batch_error = float(
-        max(
-            np.max(np.abs(batched - singleton)),
-            np.max(np.abs(batched - reversed_output)),
+    context_view = contexts[:, permutation]
+    context_contiguous = np.ascontiguousarray(context_view)
+    context_view_output = _infer(model, context_view, queries, batch_size, device)
+    context_contiguous_output = _infer(
+        model, context_contiguous, queries, batch_size, device
+    )
+    context_view_batch_8_output = _infer(model, context_view, queries, 8, device)
+    context_contiguous_batch_8_output = _infer(
+        model, context_contiguous, queries, 8, device
+    )
+    block_permutation = np.concatenate(
+        [
+            np.arange(stop - 1, start - 1, -1)
+            for start in range(0, len(contexts), batch_size)
+            for stop in (min(start + batch_size, len(contexts)),)
+        ]
+    )
+    block_inverse = np.argsort(block_permutation)
+    block_output = _infer(
+        model,
+        contexts[block_permutation],
+        queries[block_permutation],
+        batch_size,
+        device,
+    )[block_inverse]
+
+    if len(contexts) < batch_size + take:
+        raise RuntimeError("PFN replay stress panel is too small")
+    replacement_contexts = contexts[:batch_size].copy()
+    replacement_queries = queries[:batch_size].copy()
+    replacement_contexts[take:] = np.tile(
+        contexts[batch_size : batch_size + take],
+        ((batch_size - take) // take, 1, 1),
+    )
+    replacement_queries[take:] = np.tile(
+        queries[batch_size : batch_size + take], ((batch_size - take) // take, 1)
+    )
+    companion_output = _infer(
+        model, replacement_contexts, replacement_queries, batch_size, device
+    )
+    relocated_contexts = np.concatenate(
+        [replacement_contexts[take:], contexts[:take]], axis=0
+    )
+    relocated_queries = np.concatenate(
+        [replacement_queries[take:], queries[:take]], axis=0
+    )
+    relocated_output = _infer(
+        model, relocated_contexts, relocated_queries, batch_size, device
+    )
+
+    comparisons: dict[str, dict[str, float | bool]] = {
+        "stress_repeat": compare(batched, repeated),
+        "stress_singleton": compare(batched, singleton),
+        "stress_batch_8": compare(batched, batch_8),
+        "stress_reverse": compare(batched, reversed_output),
+        "stress_context_roll_view": compare(batched, context_view_output),
+        "stress_context_roll_contiguous": compare(batched, context_contiguous_output),
+        "stress_context_roll_view_batch_8": compare(
+            batched, context_view_batch_8_output
+        ),
+        "stress_context_roll_contiguous_batch_8": compare(
+            batched, context_contiguous_batch_8_output
+        ),
+        "stress_same_shape_block_permutation": compare(batched, block_output),
+        "stress_fixed_shape_companion_replacement": compare(
+            batched[:take], companion_output[:take]
+        ),
+        "stress_fixed_shape_focal_relocation": compare(
+            batched[:take], relocated_output[-take:]
+        ),
+    }
+    for remainder in (35, 36, 43):
+        extended_contexts = np.concatenate(
+            [contexts[:batch_size], contexts[:remainder]], axis=0
+        )
+        extended_queries = np.concatenate(
+            [queries[:batch_size], queries[:remainder]], axis=0
+        )
+        remainder_output = _infer(
+            model, extended_contexts, extended_queries, batch_size, device
+        )[batch_size:]
+        comparisons[f"stress_remainder_{remainder}"] = compare(
+            batched[:remainder], remainder_output
+        )
+
+    full_panel: dict[str, list[dict[str, float | bool]]] = {
+        name: []
+        for name in (
+            "repeat",
+            "reverse",
+            "same_shape_block_permutation",
+            "random_permutation_1",
+            "random_permutation_2",
+            "batch_8",
+            "context_roll_view",
+            "context_roll_contiguous",
+            "context_roll_view_batch_8",
+            "context_roll_contiguous_batch_8",
+        )
+    }
+    full_panel_records: list[dict[str, Any]] = []
+    permutation_seeds = [int(seed) for seed in config["pfn_replay_permutation_seeds"]]
+    if len(permutation_seeds) != 2 or len(set(permutation_seeds)) != 2:
+        raise RuntimeError("PFN replay permutation-seed inventory mismatch")
+    for shard_index, shard in enumerate(shards):
+        shard_contexts = shard["contexts"]
+        shard_queries = shard["queries"]
+        rows = len(shard_contexts)
+        baseline = _infer(model, shard_contexts, shard_queries, batch_size, device)
+        full_panel["repeat"].append(
+            compare(
+                baseline,
+                _infer(model, shard_contexts, shard_queries, batch_size, device),
+            )
+        )
+        shard_reverse = np.arange(rows - 1, -1, -1)
+        full_panel["reverse"].append(
+            compare(
+                baseline,
+                _infer(
+                    model,
+                    shard_contexts[shard_reverse],
+                    shard_queries[shard_reverse],
+                    batch_size,
+                    device,
+                )[shard_reverse],
+            )
+        )
+        shard_blocks = np.concatenate(
+            [
+                np.arange(stop - 1, start - 1, -1)
+                for start in range(0, rows, batch_size)
+                for stop in (min(start + batch_size, rows),)
+            ]
+        )
+        shard_blocks_inverse = np.argsort(shard_blocks)
+        full_panel["same_shape_block_permutation"].append(
+            compare(
+                baseline,
+                _infer(
+                    model,
+                    shard_contexts[shard_blocks],
+                    shard_queries[shard_blocks],
+                    batch_size,
+                    device,
+                )[shard_blocks_inverse],
+            )
+        )
+        for permutation_index, seed in enumerate(permutation_seeds, start=1):
+            random_indices = np.random.default_rng(seed + shard_index).permutation(rows)
+            random_inverse = np.argsort(random_indices)
+            full_panel[f"random_permutation_{permutation_index}"].append(
+                compare(
+                    baseline,
+                    _infer(
+                        model,
+                        shard_contexts[random_indices],
+                        shard_queries[random_indices],
+                        batch_size,
+                        device,
+                    )[random_inverse],
+                )
+            )
+        full_panel["batch_8"].append(
+            compare(
+                baseline,
+                _infer(model, shard_contexts, shard_queries, 8, device),
+            )
+        )
+        shard_context_view = shard_contexts[:, permutation]
+        full_panel["context_roll_view"].append(
+            compare(
+                baseline,
+                _infer(model, shard_context_view, shard_queries, batch_size, device),
+            )
+        )
+        full_panel["context_roll_contiguous"].append(
+            compare(
+                baseline,
+                _infer(
+                    model,
+                    np.ascontiguousarray(shard_context_view),
+                    shard_queries,
+                    batch_size,
+                    device,
+                ),
+            )
+        )
+        full_panel["context_roll_view_batch_8"].append(
+            compare(
+                baseline,
+                _infer(model, shard_context_view, shard_queries, 8, device),
+            )
+        )
+        full_panel["context_roll_contiguous_batch_8"].append(
+            compare(
+                baseline,
+                _infer(
+                    model,
+                    np.ascontiguousarray(shard_context_view),
+                    shard_queries,
+                    8,
+                    device,
+                ),
+            )
+        )
+        full_panel_records.append(
+            {
+                "shard_index": shard_index,
+                "rows": rows,
+                "comparisons": {
+                    name: values[-1] for name, values in full_panel.items()
+                },
+            }
+        )
+    comparisons.update(
+        {f"full_panel_{name}": merge(items) for name, items in full_panel.items()}
+    )
+
+    batch_max_logp = max(
+        float(comparisons[name]["max_abs_logp_error"])
+        for name in REPLAY_BATCH_COMPARISONS
+    )
+    context_max_logp = max(
+        float(comparisons[name]["max_abs_logp_error"])
+        for name in REPLAY_CONTEXT_COMPARISONS
+    )
+    combined_max_logp = max(
+        float(comparisons[name]["max_abs_logp_error"])
+        for name in REPLAY_COMBINED_COMPARISONS
+    )
+    approximate_names = (
+        *REPLAY_BATCH_COMPARISONS,
+        *REPLAY_CONTEXT_COMPARISONS,
+        *REPLAY_COMBINED_COMPARISONS,
+    )
+    max_probability = max(
+        float(comparisons[name]["max_abs_probability_error"])
+        for name in approximate_names
+    )
+    max_total_variation = max(
+        float(comparisons[name]["max_total_variation"]) for name in approximate_names
+    )
+    exact_pass = bool(
+        all(
+            bool(comparisons[name]["bit_identical"])
+            for name in REPLAY_EXACT_COMPARISONS
         )
     )
-    context_error = float(np.max(np.abs(batched - permuted)))
     passed = bool(
-        batch_error <= float(config["pfn_batch_logp_atol"])
-        and context_error <= float(config["pfn_context_permutation_logp_atol"])
+        exact_pass
+        and batch_max_logp <= float(config["pfn_batch_logp_atol"])
+        and context_max_logp <= float(config["pfn_context_permutation_logp_atol"])
+        and combined_max_logp
+        <= float(config["pfn_combined_context_batch_logp_atol"])
+        and max_probability <= float(config["pfn_replay_probability_atol"])
+        and max_total_variation <= float(config["pfn_replay_total_variation_atol"])
     )
     return {
-        "rows": len(contexts),
-        "singleton_and_reverse_batch_max_abs_logp_error": batch_error,
-        "context_roll_max_abs_logp_error": context_error,
+        "stress_rows": len(contexts),
+        "full_panel_rows": int(sum(len(shard["contexts"]) for shard in shards)),
+        "full_panel_shards": full_panel_records,
+        "comparisons": comparisons,
+        "exact_controls_pass": exact_pass,
+        "batch_max_abs_logp_error": batch_max_logp,
+        "context_max_abs_logp_error": context_max_logp,
+        "combined_max_abs_logp_error": combined_max_logp,
+        "approximate_max_abs_probability_error": max_probability,
+        "approximate_max_total_variation": max_total_variation,
         "pass": passed,
     }
 
