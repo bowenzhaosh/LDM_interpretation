@@ -52,6 +52,13 @@ LABEL_ARRAYS = (
     "true_orderings",
 )
 
+# The frozen generator constructs Sigma_ij and Sigma_ji through the same
+# floating-point products in opposite operand order. IEEE-754 roundoff can
+# therefore differ by a few ulps even though the analytical matrix is
+# symmetric. This bound accepts only that construction-level roundoff and
+# leaves the generated arrays unchanged.
+COVARIANCE_SYMMETRY_RTOL = 4.0 * np.finfo(np.float64).eps
+
 
 def _digest_rows(arrays: dict[str, np.ndarray], names: tuple[str, ...]) -> np.ndarray:
     count = len(arrays[names[0]])
@@ -149,14 +156,26 @@ def split_stream(
     return outputs
 
 
-def _validate_stream(fleet: Any, stream: dict[str, np.ndarray], count: int) -> None:
+def _validate_stream(
+    fleet: Any, stream: dict[str, np.ndarray], count: int
+) -> dict[str, float]:
     for name in ("contexts", "queries", "outcomes", "sigmas"):
         if not np.isfinite(stream[name]).all():
             raise RuntimeError(f"non-finite generated stream array: {name}")
-    if not np.allclose(
-        stream["sigmas"], stream["sigmas"].transpose(0, 2, 1), atol=0, rtol=0
-    ):
-        raise RuntimeError("generated covariance is not exactly symmetric")
+    sigmas = stream["sigmas"]
+    transposed = sigmas.transpose(0, 2, 1)
+    asymmetry = np.abs(sigmas - transposed)
+    symmetry_scale = np.maximum(np.abs(sigmas), np.abs(transposed))
+    relative_asymmetry = np.divide(
+        asymmetry,
+        symmetry_scale,
+        out=np.zeros_like(asymmetry),
+        where=symmetry_scale > 0.0,
+    )
+    if np.any(asymmetry > COVARIANCE_SYMMETRY_RTOL * symmetry_scale):
+        raise RuntimeError(
+            "generated covariance exceeds the float64 symmetry roundoff bound"
+        )
     if np.any(np.linalg.eigvalsh(stream["sigmas"])[:, 0] <= 0.0):
         raise RuntimeError("generated covariance is not positive definite")
     if not np.all(fleet.validity_keep(stream["sigmas"])):
@@ -170,6 +189,11 @@ def _validate_stream(fleet: Any, stream: dict[str, np.ndarray], count: int) -> N
         (expected_bins < 0) | (expected_bins >= 100)
     ):
         raise RuntimeError("generated native bin is outside [0,99]")
+    return {
+        "covariance_symmetry_rtol": float(COVARIANCE_SYMMETRY_RTOL),
+        "covariance_max_abs_asymmetry": float(np.max(asymmetry)),
+        "covariance_max_relative_asymmetry": float(np.max(relative_asymmetry)),
+    }
 
 
 def build_panel(
@@ -198,7 +222,7 @@ def build_panel(
     for prior_code, prior in enumerate(config["priors"]):
         for draw_index, seed in enumerate(config["evaluation_seeds"][prior]):
             stream = generate_evaluation_stream(fleet, prior, count, 30, int(seed))
-            _validate_stream(fleet, stream, count)
+            validation = _validate_stream(fleet, stream, count)
             stream_name = f"{prior}_d{draw_index}"
             stream_records[stream_name] = {
                 "prior": prior,
@@ -206,6 +230,7 @@ def build_panel(
                 "evaluation_seed": int(seed),
                 "rows": count,
                 "content_sha256": sha256_named_arrays(stream),
+                "validation": validation,
             }
             shards = split_stream(
                 stream,

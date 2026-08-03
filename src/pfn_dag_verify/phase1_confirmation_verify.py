@@ -76,6 +76,7 @@ CHECKPOINT_STEPS = np.array([20_000, 60_000, 120_000], dtype=np.int64)
 CANONICAL_SOURCES = (
     "PHASE1_ORDERING_PREREG.md",
     "PHASE1_ORDERING_CONFIRMATION_AMENDMENT.md",
+    "PHASE1_ORDERING_CONFIRMATION_FIX1.md",
     "config/phase1_ordering_confirmation.json",
     "config/phase1_checkpoint_registry.json",
     "artifacts/phase1/d4_generator.py",

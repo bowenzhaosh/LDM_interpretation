@@ -1,6 +1,6 @@
 # Phase-1 ordering-use replication preregistration
 
-Status: **QUALIFICATION V3 PASSED; CONFIRMATORY HARNESS UNDER FINAL PRE-RUN AUDIT**
+Status: **QUALIFICATION V3 PASSED; ATTEMPT 1 FAILED BEFORE SCIENCE; FIX1 UNDER PRE-RUN AUDIT**
 
 Pre-confirmation code audit found that the version-1 ordering ablation was
 misimplemented after top-K truncation. Within-ordering weights were divided by

@@ -18,8 +18,12 @@ It does not test whether a Transformer implements Bayes, whether attention is th
   archived d4 fleet eventually exploits predictive information associated
   with causal ordering. Its preregistration, checkpoint registry, held Slurm
   launcher, numerical-clearance rules, and independent raw verifier are frozen
-  by `phase1-ordering-confirmation-v1`. No result is claimed until that tagged
-  attempt completes and its raw archive passes post-run audit.
+  by `phase1-ordering-confirmation-v1-fix1`. The original v1 attempt failed
+  before any checkpoint scoring because a harness guard required bitwise
+  covariance symmetry; its complete failure record is archived under
+  `campaigns/phase1_ordering_20260803/ordering_confirmation_v1_attempt1_failed/`.
+  No result is claimed until the repaired attempt completes and its raw archive
+  passes post-run audit.
 
 ## Scientific design
 

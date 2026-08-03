@@ -267,6 +267,7 @@ def test_all_producers_derive_one_portable_canonical_attempt_identity():
     )
     source_inventory = identities[0][0]["source_inventory"]
     assert "PHASE1_ORDERING_CONFIRMATION_AMENDMENT.md" in source_inventory
+    assert "PHASE1_ORDERING_CONFIRMATION_FIX1.md" in source_inventory
     assert "cluster/submit_phase1_confirmation.py" in source_inventory
     assert "cluster/submit_phase1_confirmation.py" in source_inventory
     assert all(not Path(name).is_absolute() for name in source_inventory)

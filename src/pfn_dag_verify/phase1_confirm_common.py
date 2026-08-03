@@ -36,6 +36,7 @@ QUALIFICATION_V3_CONTEXT_SEEDS = frozenset(
 CANONICAL_CONFIRMATION_SOURCES = (
     "PHASE1_ORDERING_PREREG.md",
     "PHASE1_ORDERING_CONFIRMATION_AMENDMENT.md",
+    "PHASE1_ORDERING_CONFIRMATION_FIX1.md",
     "config/phase1_ordering_confirmation.json",
     "config/phase1_checkpoint_registry.json",
     "artifacts/phase1/d4_generator.py",
@@ -416,8 +417,8 @@ def validate_confirmation_config(config_path: Path) -> dict[str, Any]:
         "schema_version": 1,
         "status": "confirmatory_locked",
         "scope": "fixed archived d4 base fleet ordering-use replication",
-        "required_attempt_tag": "phase1-ordering-confirmation-v1",
-        "protocol_amendment": "PHASE1_ORDERING_CONFIRMATION_AMENDMENT.md",
+        "required_attempt_tag": "phase1-ordering-confirmation-v1-fix1",
+        "protocol_amendment": "PHASE1_ORDERING_CONFIRMATION_FIX1.md",
         "dimension": 4,
         "context_size": 30,
         "native_output_bins": 100,
