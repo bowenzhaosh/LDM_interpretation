@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "campaign": "phase1-ordering-essential-claim",
+  "cluster": "washu",
+  "jobs": [
+    {
+      "job_id": "158817",
+      "stage": "runtime_inventory",
+      "submitted_at": "2026-08-03T19:02:38+08:00",
+      "source_snapshot": "/engrfs/project/class/zhao.b/pfn-dag-e18b/phase1_verify/preflight-26d7e2b/source",
+      "output_dir": "/engrfs/project/class/zhao.b/pfn-dag-e18b/phase1_verify/preflight-26d7e2b/output",
+      "partition": "condo-cse5100",
+      "account": "engr-acad-cse5100",
+      "qos": "normal",
+      "gres": "gpu:a100:1",
+      "cpus_per_task": 4,
+      "memory": "16G",
+      "time_limit": "00:20:00",
+      "submission_note": "sbatch returned job id after a non-fatal spank-auks credential-forwarding warning",
+      "state": "COMPLETED",
+      "elapsed": "00:00:43",
+      "exit_code": "0:0",
+      "node": "a100-2207",
+      "max_rss": "393032K",
+      "runtime_binary_fingerprint": "d26655007a935424b7a7214bb16ee28c3e7717a17dbd1e8614b66374b720237b",
+      "local_raw_artifacts": [
+        "runtime_inventory/gpu_identity.csv",
+        "runtime_inventory/gpu_utilization.csv",
+        "runtime_inventory/sacct.txt",
+        "../../environment/phase1-washu-binary-inventory.json"
+      ]
+    }
+  ]
+}
