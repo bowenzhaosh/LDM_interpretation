@@ -1,8 +1,8 @@
 """Independent verifier for the frozen Phase-1 oracle qualification artifacts.
 
 This module deliberately does not import the qualification runner or joiner.
-It recomputes the scientific gate from sealed raw arrays and verifies executable
-source against Git blobs from the recorded commit.
+It recomputes the scientific gate from sealed raw arrays and verifies the
+artifact source and verifier source against separately recorded Git commits.
 """
 
 from __future__ import annotations
@@ -21,6 +21,13 @@ import numpy as np
 
 
 COMMIT = "cdd541c2ac7038b5cb8c7c6d3f1f6ac1811e4b88"
+V3_SOURCE_TAG = "phase1-ordering-qualification-v3"
+V3_VERIFIER_FIX_TAG = "phase1-ordering-qualification-v3-verifier-fix1"
+V3_VERIFIER_FIX1_JOINED_SHA256 = {
+    "COMPLETE.json": "dff6b9a4eaf826744911c49cd1d391597e5fead34a74f45bac2d8fe27f83bcdd",
+    "qualification_raw.npz": "a4bc89e5f22f41764ddefb310bc2fb67dc291c0d0156949c1840841549915317",
+    "qualification_summary.json": "e0d30a980de7f1e520e1fc3292edb6a028093f5443e269a3c96d92d5b2abeb30",
+}
 CANDIDATES = (8192, 16384)
 REFERENCE = 32768
 PRIORS = ("C", "N")
@@ -176,14 +183,32 @@ def _verify_annotated_tag(repo: Path, tag: str, commit: str) -> None:
         )
 
 
-def _relative_source_path(absolute: str) -> str:
-    marker = "/source/"
-    if marker not in absolute:
-        raise RuntimeError(f"source inventory path lacks checkout root: {absolute}")
-    relative = absolute.split(marker, 1)[1]
-    if not relative or relative.startswith("/") or ".." in Path(relative).parts:
-        raise RuntimeError(f"unsafe source inventory path: {absolute}")
-    return relative
+def _relative_source_path(
+    absolute: str, expected_relative_paths: set[str]
+) -> str:
+    absolute_path = Path(absolute)
+    if not absolute_path.is_absolute():
+        raise RuntimeError(f"source inventory path is not absolute: {absolute}")
+    matches = []
+    for relative in expected_relative_paths:
+        relative_path = Path(relative)
+        if (
+            relative_path.is_absolute()
+            or not relative_path.parts
+            or ".." in relative_path.parts
+        ):
+            raise RuntimeError(f"unsafe expected source path: {relative}")
+        if (
+            len(absolute_path.parts) >= len(relative_path.parts)
+            and absolute_path.parts[-len(relative_path.parts) :] == relative_path.parts
+        ):
+            matches.append(relative)
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"source inventory path does not identify exactly one expected source: "
+            f"{absolute}; matches={sorted(matches)}"
+        )
+    return matches[0]
 
 
 def _verify_source_inventory(
@@ -194,10 +219,12 @@ def _verify_source_inventory(
 ) -> None:
     if not isinstance(inventory, dict) or not inventory:
         raise RuntimeError("missing source inventory")
-    relative_inventory = {
-        _relative_source_path(str(absolute)): expected
-        for absolute, expected in inventory.items()
-    }
+    relative_inventory = {}
+    for absolute, expected in inventory.items():
+        relative = _relative_source_path(str(absolute), expected_relative_paths)
+        if relative in relative_inventory:
+            raise RuntimeError(f"duplicate source inventory path: {relative}")
+        relative_inventory[relative] = expected
     if set(relative_inventory) != expected_relative_paths:
         missing = sorted(expected_relative_paths - set(relative_inventory))
         extra = sorted(set(relative_inventory) - expected_relative_paths)
@@ -208,6 +235,28 @@ def _verify_source_inventory(
         observed = _sha256_bytes(_git_blob(repo, commit, relative))
         if observed != expected:
             raise RuntimeError(f"source inventory mismatch: {relative}")
+
+
+def _verify_frozen_joined_artifacts(
+    root: Path, expected_sha256: dict[str, str]
+) -> None:
+    joined = root / "joined"
+    if set(expected_sha256) != {
+        "COMPLETE.json",
+        "qualification_raw.npz",
+        "qualification_summary.json",
+    }:
+        raise RuntimeError("invalid frozen joined-artifact hash set")
+    for name, expected in expected_sha256.items():
+        path = joined / name
+        if not path.is_file():
+            raise RuntimeError(f"missing frozen joined artifact: {path}")
+        observed = _sha256_file(path)
+        if observed != expected:
+            raise RuntimeError(
+                f"frozen joined artifact hash mismatch: {name}: "
+                f"{observed} != {expected}"
+            )
 
 
 def _verify_artifact_inventory(
@@ -703,6 +752,8 @@ def verify_qualification(
     repo: Path,
     commit: str = COMMIT,
     protocol_version: int = 1,
+    verifier_commit: str | None = None,
+    verifier_tag: str | None = None,
 ) -> dict[str, Any]:
     if protocol_version == 2:
         raise RuntimeError(
@@ -710,15 +761,29 @@ def verify_qualification(
         )
     root = root.resolve()
     repo = repo.resolve()
+    resolved_verifier_commit = verifier_commit or commit
+    resolved_verifier_tag: str | None = None
     if protocol_version >= 2:
         verifier_relative = "src/pfn_dag_verify/phase1_qualification_verify.py"
         committed_verifier_sha256 = _sha256_bytes(
-            _git_blob(repo, commit, verifier_relative)
+            _git_blob(repo, resolved_verifier_commit, verifier_relative)
         )
         if _sha256_file(Path(__file__).resolve()) != committed_verifier_sha256:
-            raise RuntimeError("independent verifier source differs from recorded commit")
+            raise RuntimeError(
+                "independent verifier source differs from verifier commit"
+            )
     if protocol_version == 3:
-        _verify_annotated_tag(repo, "phase1-ordering-qualification-v3", commit)
+        _verify_annotated_tag(repo, V3_SOURCE_TAG, commit)
+        if resolved_verifier_commit == commit:
+            if verifier_tag not in {None, V3_SOURCE_TAG}:
+                raise RuntimeError("same-commit verifier tag mismatch")
+            resolved_verifier_tag = V3_SOURCE_TAG
+        else:
+            if verifier_tag != V3_VERIFIER_FIX_TAG:
+                raise RuntimeError("qualification v3 verifier-fix tag mismatch")
+            _verify_annotated_tag(repo, V3_VERIFIER_FIX_TAG, resolved_verifier_commit)
+            resolved_verifier_tag = V3_VERIFIER_FIX_TAG
+            _verify_frozen_joined_artifacts(root, V3_VERIFIER_FIX1_JOINED_SHA256)
     verified = [
         _verify_shard(
             root / f"bank{bank}" / "run",
@@ -965,6 +1030,9 @@ def verify_qualification(
             "platform": platform.platform(),
         },
         "source_commit": commit,
+        "source_tag": V3_SOURCE_TAG if protocol_version == 3 else None,
+        "verifier_commit": resolved_verifier_commit,
+        "verifier_source_tag": resolved_verifier_tag,
         "decision": expected_decision,
         "selected_truncation": selected,
         "reference_truncation": REFERENCE,
@@ -984,17 +1052,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--commit", default=COMMIT)
+    parser.add_argument("--verifier-commit")
+    parser.add_argument("--verifier-tag")
     parser.add_argument("--protocol-version", type=int, choices=(1, 2, 3), default=1)
     arguments = parser.parse_args(argv)
     if arguments.protocol_version >= 2 and arguments.commit == COMMIT:
         raise RuntimeError(
             f"qualification v{arguments.protocol_version} requires its explicit source commit"
         )
+    if arguments.protocol_version >= 2 and arguments.verifier_commit is None:
+        raise RuntimeError(
+            f"qualification v{arguments.protocol_version} requires its explicit verifier commit"
+        )
     result = verify_qualification(
         arguments.root,
         arguments.repo,
         arguments.commit,
         protocol_version=arguments.protocol_version,
+        verifier_commit=arguments.verifier_commit,
+        verifier_tag=arguments.verifier_tag,
     )
     payload = json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n"
     arguments.out.parent.mkdir(parents=True, exist_ok=True)

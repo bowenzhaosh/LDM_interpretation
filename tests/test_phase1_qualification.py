@@ -52,6 +52,52 @@ def test_independent_verifier_uses_exact_tag_namespace_and_commit_peel(
     ]
 
 
+def test_independent_verifier_maps_source_inventory_from_arbitrary_checkout_name(
+    tmp_path, monkeypatch
+):
+    relative = "PHASE1_ORDERING_PREREG.md"
+    payload = b"frozen preregistration"
+    inventory = {
+        "/engrfs/project/class/zhao.b/"
+        "LDM_interpretation_phase1_qv3_fc0b8eb/PHASE1_ORDERING_PREREG.md":
+        independent_verifier._sha256_bytes(payload)
+    }
+    monkeypatch.setattr(
+        independent_verifier,
+        "_git_blob",
+        lambda repo, commit, source_relative: payload
+        if source_relative == relative
+        else b"wrong",
+    )
+    independent_verifier._verify_source_inventory(
+        inventory, tmp_path, "artifact-source-commit", {relative}
+    )
+
+
+def test_verifier_fix_pins_exact_frozen_joined_artifacts(tmp_path):
+    joined = tmp_path / "joined"
+    joined.mkdir()
+    payloads = {
+        "COMPLETE.json": b"complete",
+        "qualification_raw.npz": b"raw",
+        "qualification_summary.json": b"summary",
+    }
+    for name, payload in payloads.items():
+        (joined / name).write_bytes(payload)
+    expected = {
+        name: independent_verifier._sha256_bytes(payload)
+        for name, payload in payloads.items()
+    }
+    independent_verifier._verify_frozen_joined_artifacts(tmp_path, expected)
+    (joined / "qualification_raw.npz").write_bytes(b"raw-mutated")
+    with pytest.raises(RuntimeError, match="frozen joined artifact hash mismatch"):
+        independent_verifier._verify_frozen_joined_artifacts(tmp_path, expected)
+    with pytest.raises(RuntimeError, match="missing frozen joined artifact"):
+        independent_verifier._verify_frozen_joined_artifacts(
+            tmp_path / "wrong-root", expected
+        )
+
+
 def _write_shard(
     run_dir: Path,
     bank_index: int,
@@ -450,15 +496,34 @@ def test_independent_v3_verifier_recomputes_predictions_without_runner_imports(
         "_git_blob",
         lambda repo, commit, relative: (ROOT / relative).read_bytes(),
     )
+    monkeypatch.setattr(
+        independent_verifier,
+        "V3_VERIFIER_FIX1_JOINED_SHA256",
+        {
+            "COMPLETE.json": _sha256_file(artifact_root / "joined" / "COMPLETE.json"),
+            "qualification_raw.npz": _sha256_file(
+                artifact_root / "joined" / "qualification_raw.npz"
+            ),
+            "qualification_summary.json": _sha256_file(
+                artifact_root / "joined" / "qualification_summary.json"
+            ),
+        },
+    )
     result = independent_verifier.verify_qualification(
         artifact_root,
         ROOT,
         commit="test-qualification-commit",
         protocol_version=3,
+        verifier_commit="test-verifier-fix-commit",
+        verifier_tag=independent_verifier.V3_VERIFIER_FIX_TAG,
     )
     assert result["verification"] == "INDEPENDENT_RAW_RECOMPUTATION_PASS"
     assert result["selected_truncation"] == 8192
     assert result["qualification_protocol_version"] == 3
+    assert result["source_commit"] == "test-qualification-commit"
+    assert result["source_tag"] == independent_verifier.V3_SOURCE_TAG
+    assert result["verifier_commit"] == "test-verifier-fix-commit"
+    assert result["verifier_source_tag"] == independent_verifier.V3_VERIFIER_FIX_TAG
 
 
 def test_one_tail_exceedance_disqualifies_only_the_affected_candidate(
