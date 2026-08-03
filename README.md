@@ -30,7 +30,7 @@ Checkpoint provenance is limited. The file hashes are exact and portable within 
 
 ## Environment
 
-The executed scientific runtime is CPython 3.11.7 on macOS arm64 with deterministic CPU PyTorch. Direct requirements are listed in `environment/requirements-lock.txt`. `environment/installed-distributions.json` additionally fingerprints each installed distribution's `RECORD` file and the Python executable. This is a local-runtime lock, not a cross-platform container.
+The executed scientific runtime is CPython 3.11.7 on macOS arm64 with deterministic CPU PyTorch. Direct requirements are listed in `environment/requirements-lock.txt`. `environment/installed-distributions.json` additionally fingerprints each installed distribution's `RECORD` file and the Python executable. This is a local-runtime lock, not a cross-platform container. Archive verification uses a fresh source clone and the same locked local interpreter; it does not claim reconstruction on a new machine.
 
 ```bash
 python3.11 -m venv .venv
@@ -59,6 +59,23 @@ python -m pfn_dag_verify.run_lock_builder
 ```
 
 The readiness builder removes caller-supplied pytest selectors, collects the explicit `tests/` tree, requires every collected test to pass, and binds the output hash. The runtime check verifies the Python binary, imported package origins, and every non-cache payload listed by the locked NumPy, SciPy, scikit-learn, and PyTorch distributions. The run lock hashes the plan, harness, query bank, checkpoint registry, runtime records, all seven required validation files, per-lens audit evidence, and the machine-readable `READY_V3` attestation. Commit the resulting tree before scientific evaluation. Every scientific stage rejects a dirty tree or a run-lock mismatch.
+
+## Qualify the native output coordinate first
+
+The sealed version-3 science run found that synthetic mixture fixtures pass while native PFN predictions do not yet have a validated scalar coordinate. `MAPPING_QUALIFICATION_PREREG.md` defines the prospective bridge test. It is intentionally evidence-blind: it saves and checks coordinate/KL agreement, endpoint-segment residuals, two-bank agreement, and raw inference replay tensors, but never computes an evidence-response slope or reconstruction score.
+
+After committing a clean tree, run the one-shot qualification:
+
+```bash
+python -m pfn_dag_verify.mapping_qualification panel
+python -m pfn_dag_verify.mapping_qualification score
+python -m pfn_dag_verify.mapping_qualification verify
+python -m pfn_dag_verify.qualification_seal seal
+```
+
+Panel creation atomically records the first attempt as the annotated Git tag `mapping-qualification-attempt-v1` before drawing data. A failed gate returns `FAILED_NATIVE_MAPPING` and makes `score` exit 2. That is a completed scientific result, not a crashed job. `verify` still validates a failed artifact from raw arrays. The sealing command creates a content-addressed tar with the complete raw run, exact source/checkpoint Git bundle, attempt tag, replay instructions, and a verified fresh-source replay in the same locked local runtime.
+
+Do not generate another induced-coordinate scientific panel unless this qualification returns `QUALIFIED`. A failure says that this readout cannot presently adjudicate Bayesian compatibility. It does not say that the checkpoints are non-Bayesian.
 
 ## Execute the scientific run
 

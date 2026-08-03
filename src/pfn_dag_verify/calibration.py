@@ -6,13 +6,11 @@ from pathlib import Path
 
 import numpy as np
 
+from .constants import CALIBRATION_SEED
 from .generative import generate_group
 from .oracle import GridOracle
 from .query_bank import CANDIDATE_QUERIES, select_symmetric_query_bank
 from .storage import write_numeric_npz_atomic
-
-
-CALIBRATION_SEED = 820001
 
 
 def build_calibration_panel(n_contexts: int = 512):
@@ -88,4 +86,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
-

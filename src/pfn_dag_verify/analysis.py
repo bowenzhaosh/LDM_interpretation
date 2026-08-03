@@ -867,7 +867,7 @@ def _mapping_block(panel, shards, bank_index, contrast="replace"):
         "coordinate_kl_abs_g": pair(gdiff),
         f"mixture_residual_{source_name}": pair(mix_source),
         "mixture_residual_target": pair(mix_target),
-        "reconstruction_residual": pair(reconstruction),
+        "identity_reconstruction_residual": pair(reconstruction),
     }
     result["pass"] = bool(
         result["boundary_rate"] == 0.0
@@ -877,8 +877,6 @@ def _mapping_block(panel, shards, bank_index, contrast="replace"):
         and result[f"mixture_residual_{source_name}"]["p95"] <= 0.30
         and result["mixture_residual_target"]["median"] <= 0.10
         and result["mixture_residual_target"]["p95"] <= 0.30
-        and result["reconstruction_residual"]["median"] <= 0.10
-        and result["reconstruction_residual"]["p95"] <= 0.30
     )
     return result
 
@@ -960,7 +958,7 @@ def _summarize(*, run_dir: Path, replay_mode: bool):
                         "coordinate_kl_abs_g",
                         "mixture_residual_core",
                         "mixture_residual_target",
-                        "reconstruction_residual",
+                        "identity_reconstruction_residual",
                     }
                 }
             )
@@ -1010,6 +1008,11 @@ def _summarize(*, run_dir: Path, replay_mode: bool):
         )
     )
     mapping_pass = all(block.get("pass") is True for block in mapping)
+    reconstruction_confirmation_pass = all(
+        block["identity_reconstruction_residual"]["median"] <= 0.10
+        and block["identity_reconstruction_residual"]["p95"] <= 0.30
+        for block in mapping
+    )
     if not all(block is not None for block in replace):
         raise AssertionError("locked primary metric unexpectedly produced no rows")
     decision = decide_primary(
@@ -1017,6 +1020,7 @@ def _summarize(*, run_dir: Path, replay_mode: bool):
             instrument_pass=instrument_pass,
             identifiable=identifiable,
             mapping_pass=mapping_pass,
+            reconstruction_confirmation_pass=reconstruction_confirmation_pass,
             canary_intervals=tuple(
                 tuple(block["permutation_null_interval"]) for block in replace
             ),
@@ -1059,6 +1063,7 @@ def _summarize(*, run_dir: Path, replay_mode: bool):
         "instrument_pass": instrument_pass,
         "identifiable": identifiable,
         "mapping": mapping,
+        "reconstruction_confirmation_pass": reconstruction_confirmation_pass,
         "replace_primary": replace,
         "append_secondary": append,
         "training_secondary": training,

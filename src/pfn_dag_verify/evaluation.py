@@ -66,7 +66,30 @@ def _select_interior_groups(
     max_core_candidates: int,
     max_blocks_per_core: int,
     min_within_group_sd: float,
+    interior_weight_min: float = 0.05,
+    interior_weight_max: float = 0.95,
+    minimum_endpoint_js: float = 0.10,
+    seed_namespace: str | None = None,
+    seed_root: str | None = None,
 ):
+    if not 0.0 < interior_weight_min < interior_weight_max < 1.0:
+        raise ValueError("interior-weight thresholds must lie strictly inside (0,1)")
+    if not 0.0 <= minimum_endpoint_js <= 1.0:
+        raise ValueError("minimum endpoint JS must lie in [0,1]")
+    seed_root = commit_sha if seed_root is None else seed_root
+    if not isinstance(seed_root, str) or len(seed_root) != 40:
+        raise ValueError("selection seed root must be a full commit SHA")
+    if seed_namespace is not None:
+        if (
+            not isinstance(seed_namespace, str)
+            or not seed_namespace
+            or seed_namespace.startswith(":")
+            or seed_namespace.endswith(":")
+        ):
+            raise ValueError("seed namespace must be a nonempty colon-free-boundary string")
+        seed_prefix = f"{seed_namespace}:"
+    else:
+        seed_prefix = ""
     primary_oracle = GridOracle(query_banks[0], quadrature=15)
     alternate_oracle = GridOracle(query_banks[1], quadrature=15)
     required_blocks = n_continuations + 1
@@ -89,7 +112,9 @@ def _select_interior_groups(
     block_eligible_rank = []
 
     for core_index in range(max_core_candidates):
-        this_core_seed = derive_seed(commit_sha, f"core-candidate:{core_index}")
+        this_core_seed = derive_seed(
+            seed_root, f"{seed_prefix}core-candidate:{core_index}"
+        )
         core_rng = np.random.default_rng(this_core_seed)
         covariance = sample_valid_sigma(core_rng)
         graph = int(core_rng.integers(0, 2))
@@ -105,7 +130,8 @@ def _select_interior_groups(
 
         for candidate_index in range(max_blocks_per_core):
             this_block_seed = derive_seed(
-                commit_sha, f"core-candidate:{core_index}:block:{candidate_index}"
+                seed_root,
+                f"{seed_prefix}core-candidate:{core_index}:block:{candidate_index}",
             )
             block_rng = np.random.default_rng(this_block_seed)
             block = sample_context(block_rng, graph, parameters, 10)
@@ -115,17 +141,17 @@ def _select_interior_groups(
             js_primary = -1.0
             js_alternate = -1.0
             reason = 1
-            if 0.05 <= weight <= 0.95:
+            if interior_weight_min <= weight <= interior_weight_max:
                 primary_bundle = primary_oracle.evaluate(context)
                 if abs(primary_bundle.ell - ell) > 1e-10:
                     raise AssertionError("selection evidence changed during endpoint evaluation")
                 js_primary = primary_bundle.js
-                if js_primary >= 0.1:
+                if js_primary >= minimum_endpoint_js:
                     alternate_bundle = alternate_oracle.evaluate(context)
                     if abs(alternate_bundle.ell - ell) > 1e-10:
                         raise AssertionError("query banks disagree on selection evidence")
                     js_alternate = alternate_bundle.js
-                    reason = 0 if js_alternate >= 0.1 else 3
+                    reason = 0 if js_alternate >= minimum_endpoint_js else 3
                 else:
                     reason = 2
             block_context.append(block)
@@ -186,6 +212,19 @@ def _select_interior_groups(
         "selection_max_core_candidates": np.asarray(max_core_candidates, dtype=np.int32),
         "selection_max_blocks_per_core": np.asarray(max_blocks_per_core, dtype=np.int32),
         "selection_min_within_group_sd": np.asarray(min_within_group_sd, dtype=np.float64),
+        "selection_interior_weight_min": np.asarray(
+            interior_weight_min, dtype=np.float64
+        ),
+        "selection_interior_weight_max": np.asarray(
+            interior_weight_max, dtype=np.float64
+        ),
+        "selection_minimum_endpoint_js": np.asarray(
+            minimum_endpoint_js, dtype=np.float64
+        ),
+        "selection_seed_namespace": np.frombuffer(
+            (seed_namespace or "").encode("utf-8"), dtype=np.uint8
+        ),
+        "selection_seed_root": np.frombuffer(seed_root.encode("ascii"), dtype=np.uint8),
         "candidate_core_sigma": np.stack(core_sigma),
         "candidate_core_graph": np.asarray(core_graph, dtype=np.int8),
         "candidate_core_params": np.asarray(core_params, dtype=np.float64),
@@ -217,8 +256,13 @@ def generate_panel(
     max_core_candidates: int = 2_000,
     max_blocks_per_core: int = 512,
     min_within_group_sd: float = 0.25,
+    interior_weight_min: float = 0.05,
+    interior_weight_max: float = 0.95,
+    minimum_endpoint_js: float = 0.10,
     scientific: bool = False,
     run_lock_sha256: str | None = None,
+    seed_namespace: str | None = None,
+    seed_root: str | None = None,
 ):
     started = time.perf_counter()
     out_path = Path(out_path).resolve()
@@ -238,6 +282,9 @@ def generate_panel(
             "max_core_candidates": settings["max_core_candidates"],
             "max_blocks_per_core": settings["max_blocks_per_core"],
             "min_within_group_sd": settings["min_within_group_sd"],
+            "interior_weight_min": 0.05,
+            "interior_weight_max": 0.95,
+            "minimum_endpoint_js": 0.10,
         }
         observed_design = {
             "n_groups": n_groups,
@@ -245,9 +292,14 @@ def generate_panel(
             "max_core_candidates": max_core_candidates,
             "max_blocks_per_core": max_blocks_per_core,
             "min_within_group_sd": min_within_group_sd,
+            "interior_weight_min": interior_weight_min,
+            "interior_weight_max": interior_weight_max,
+            "minimum_endpoint_js": minimum_endpoint_js,
         }
         if not interior_selected or observed_design != expected_design:
             raise ValueError("scientific panel design does not match the verified run lock")
+        if seed_namespace is not None or seed_root is not None:
+            raise ValueError("locked scientific panel does not accept a seed override")
         require_scientific_run_path(
             out_path,
             commit_sha=commit_sha,
@@ -267,6 +319,11 @@ def generate_panel(
             max_core_candidates=max_core_candidates,
             max_blocks_per_core=max_blocks_per_core,
             min_within_group_sd=min_within_group_sd,
+            interior_weight_min=interior_weight_min,
+            interior_weight_max=interior_weight_max,
+            minimum_endpoint_js=minimum_endpoint_js,
+            seed_namespace=seed_namespace,
+            seed_root=seed_root,
         )
     else:
         rng = np.random.default_rng(derive_seed(commit_sha, "groups"))
@@ -276,6 +333,17 @@ def generate_panel(
             "selection_max_core_candidates": np.asarray(0, dtype=np.int32),
             "selection_max_blocks_per_core": np.asarray(0, dtype=np.int32),
             "selection_min_within_group_sd": np.asarray(0.0, dtype=np.float64),
+            "selection_interior_weight_min": np.asarray(
+                interior_weight_min, dtype=np.float64
+            ),
+            "selection_interior_weight_max": np.asarray(
+                interior_weight_max, dtype=np.float64
+            ),
+            "selection_minimum_endpoint_js": np.asarray(
+                minimum_endpoint_js, dtype=np.float64
+            ),
+            "selection_seed_namespace": np.empty(0, dtype=np.uint8),
+            "selection_seed_root": np.frombuffer(commit_sha.encode("ascii"), dtype=np.uint8),
             "candidate_core_sigma": np.empty((0, 2, 2), dtype=np.float64),
             "candidate_core_graph": np.empty(0, dtype=np.int8),
             "candidate_core_params": np.empty((0, 3), dtype=np.float64),
@@ -360,12 +428,14 @@ def generate_panel(
     w_core = expit(ell_core)
     w_base = expit(ell_base)
     w_target = expit(ell_target)
-    interior_core = (w_core >= 0.05) & (w_core <= 0.95)
-    interior_base = (w_base >= 0.05) & (w_base <= 0.95)
-    interior_target = (w_target >= 0.05) & (w_target <= 0.95)
-    js_core_both = np.all(js_core >= 0.1, axis=0)
-    js_base_both = np.all(js_base >= 0.1, axis=0)
-    js_target_both = np.all(js_target >= 0.1, axis=0)
+    interior_core = (w_core >= interior_weight_min) & (w_core <= interior_weight_max)
+    interior_base = (w_base >= interior_weight_min) & (w_base <= interior_weight_max)
+    interior_target = (w_target >= interior_weight_min) & (
+        w_target <= interior_weight_max
+    )
+    js_core_both = np.all(js_core >= minimum_endpoint_js, axis=0)
+    js_base_both = np.all(js_base >= minimum_endpoint_js, axis=0)
+    js_target_both = np.all(js_target >= minimum_endpoint_js, axis=0)
     eligible_replace = (
         interior_base[:, None]
         & interior_target
@@ -430,6 +500,8 @@ def generate_panel(
         "scientific": scientific,
         "run_lock_sha256": run_lock_sha256,
         "evaluation_root": evaluation_root(commit_sha),
+        "seed_namespace": seed_namespace,
+        "seed_root": commit_sha if seed_root is None else seed_root,
         "candidate_core_count": int(len(selection["candidate_core_seed"])),
         "candidate_block_count": int(len(selection["candidate_block_seed"])),
         "panel_sha256": sha256_file(out_path),

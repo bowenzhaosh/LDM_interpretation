@@ -404,6 +404,34 @@ def test_selected_cohort_cap_failure_is_nonzero(monkeypatch):
         )
 
 
+def test_selected_cohort_uses_caller_locked_js_threshold(monkeypatch):
+    monkeypatch.setattr(evaluation, "GridOracle", _FakeOracle)
+    monkeypatch.setattr(evaluation, "sample_valid_sigma", lambda rng: np.eye(2))
+    monkeypatch.setattr(
+        evaluation,
+        "sigma_to_params",
+        lambda covariance, graph: SimpleNamespace(
+            beta=0.1, b_root=1.0, b_effect=1.0
+        ),
+    )
+    monkeypatch.setattr(
+        evaluation,
+        "sample_context",
+        lambda rng, graph, parameters, rows: np.zeros((rows, 2)),
+    )
+    with pytest.raises(RuntimeError, match="INCONCLUSIVE_IDENTIFIABILITY"):
+        evaluation._select_interior_groups(
+            commit_sha=TEST_COMMIT,
+            query_banks=np.stack([np.arange(8), np.arange(8) + 0.5]),
+            n_groups=1,
+            n_continuations=2,
+            max_core_candidates=1,
+            max_blocks_per_core=8,
+            min_within_group_sd=0.0,
+            minimum_endpoint_js=0.21,
+        )
+
+
 def test_content_tree_hash_is_order_sensitive_only_after_canonicalization():
     entries = [
         {"scope": "run", "path": "b", "size": 1, "sha256": "11" * 32},

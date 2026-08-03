@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .constants import LEGACY_COMPARISON_SEED
 from .generative import generate_group
 from .model import configure_determinism
 from .oracle import GridOracle
@@ -131,7 +132,7 @@ def compare(
     verify_runtime()
     current = GridOracle(queries=queries, quadrature=15)
     old = legacy.GridOracle("AL40", quad=15, queries=queries)
-    rng = np.random.default_rng(810777)
+    rng = np.random.default_rng(LEGACY_COMPARISON_SEED)
     ell_errors = []
     f0_errors = []
     f1_errors = []

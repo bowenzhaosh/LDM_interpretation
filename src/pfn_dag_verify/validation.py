@@ -6,6 +6,17 @@ from pathlib import Path
 
 import numpy as np
 
+from .constants import (
+    BATCH_COMPANION_SEED,
+    BATCH_PERMUTATION_SEED,
+    BATCH_VALIDATION_SEED,
+    BOOTSTRAP_COVERAGE_SEED,
+    CORE_ROW_PERMUTATION_SEED,
+    LENGTH30_ROW_PERMUTATION_SEED,
+    PERMUTATION_CANARY_SEED,
+    PERMUTATION_FIXTURE_SEED,
+    UNIT_CONTEXT_VALIDATION_SEED,
+)
 from .generative import generate_group
 from .evaluation import production_shape_diagnostics
 from .instrument import (
@@ -29,7 +40,7 @@ from .statistics import crossed_bootstrap_slope, permutation_null_slopes
 
 
 def _unit_contexts(count: int = 64):
-    rng = np.random.default_rng(810000)
+    rng = np.random.default_rng(UNIT_CONTEXT_VALIDATION_SEED)
     contexts = []
     while len(contexts) < count:
         group = generate_group(rng, n_continuations=2)
@@ -77,10 +88,13 @@ def validate_batch_shape(
     query_banks = np.asarray(query_banks, dtype=np.float64)
     if query_banks.shape != (2, 8):
         raise ValueError("batch-shape validation requires two eight-query banks")
-    validation_seed = 860003
-    companion_seed = 860004
-    batch_permutation_seed = 860005
-    row_permutation_seeds = {"core20": 860006, "length30": 860007}
+    validation_seed = BATCH_VALIDATION_SEED
+    companion_seed = BATCH_COMPANION_SEED
+    batch_permutation_seed = BATCH_PERMUTATION_SEED
+    row_permutation_seeds = {
+        "core20": CORE_ROW_PERMUTATION_SEED,
+        "length30": LENGTH30_ROW_PERMUTATION_SEED,
+    }
     samples = _batch_validation_contexts(validation_seed)
     companion_samples = _batch_validation_contexts(companion_seed)
     batch_permutation = np.random.default_rng(batch_permutation_seed).permutation(64)
@@ -241,14 +255,14 @@ def validate_instrument(queries: np.ndarray, quadrature: int = 15, bank_role: st
         delta_ell=delta_ell,
     )
 
-    rng = np.random.default_rng(810099)
+    rng = np.random.default_rng(PERMUTATION_FIXTURE_SEED)
     exact_change = rng.normal(size=(256, 8))
     model_change = np.broadcast_to(exact_change, (16, 256, 8)).copy()
     canary_draws = permutation_null_slopes(
         exact_change,
         model_change,
         n_permutations=2_000,
-        rng=np.random.default_rng(810101),
+        rng=np.random.default_rng(PERMUTATION_CANARY_SEED),
     )
     canary_interval = np.quantile(canary_draws, [0.025, 0.975])
 
@@ -308,7 +322,7 @@ def validate_bootstrap_coverage(
     configure_determinism(0)
     verify_runtime()
     started = time.perf_counter()
-    rng = np.random.default_rng(850002)
+    rng = np.random.default_rng(BOOTSTRAP_COVERAGE_SEED)
     results = {}
     for beta in (0.8, 1.0, 1.2):
         covered = 0
@@ -356,7 +370,7 @@ def validate_bootstrap_coverage(
         "bootstraps_per_dataset": bootstraps,
         "groups": groups,
         "percentile_interval": [0.02, 0.98],
-        "validation_seed": 850002,
+        "validation_seed": BOOTSTRAP_COVERAGE_SEED,
         "results": results,
         "pass": passed,
         "wall_seconds": time.perf_counter() - started,

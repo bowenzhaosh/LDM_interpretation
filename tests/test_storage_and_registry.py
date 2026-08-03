@@ -4,7 +4,16 @@ import numpy as np
 import pytest
 
 from pfn_dag_verify.registry import verify_file_record
-from pfn_dag_verify.storage import load_numeric_npz, write_numeric_npz_atomic
+from pfn_dag_verify.storage import (
+    load_numeric_npz,
+    write_json_atomic,
+    write_numeric_npz_atomic,
+)
+
+
+def test_json_writer_rejects_nonfinite_values(tmp_path):
+    with pytest.raises(ValueError):
+        write_json_atomic(tmp_path / "bad.json", {"value": float("nan")})
 
 
 def test_numeric_shard_round_trip_and_no_pickle(tmp_path):

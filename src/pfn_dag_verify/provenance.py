@@ -57,6 +57,7 @@ def expected_run_lock_files(root: Path | None = None) -> set[str]:
     root = repository_root() if root is None else Path(root).resolve()
     fixed = {
         "PREREG.md",
+        "MAPPING_QUALIFICATION_PREREG.md",
         "HARNESS.md",
         "AUDIT.md",
         "README.md",
@@ -132,6 +133,7 @@ def audit_readiness_subject_files(root: str | Path | None = None) -> set[str]:
     root_path = repository_root() if root is None else Path(root).resolve()
     fixed = {
         "PREREG.md",
+        "MAPPING_QUALIFICATION_PREREG.md",
         "HARNESS.md",
         "AUDIT.md",
         "README.md",
@@ -157,6 +159,7 @@ def audit_review_subject_files(root: str | Path | None = None) -> set[str]:
     root_path = repository_root() if root is None else Path(root).resolve()
     fixed = {
         "PREREG.md",
+        "MAPPING_QUALIFICATION_PREREG.md",
         "HARNESS.md",
         "README.md",
         "SOURCE_ORIGIN.md",
@@ -923,6 +926,9 @@ def verify_run_lock(repo: str | Path | None = None) -> tuple[str, str, dict]:
     verify_runtime(root)
     validate_locked_validations(root)
     validate_audit_readiness(root)
+    from .mapping_qualification import verify_completed_qualification
+
+    verify_completed_qualification(root=root, commit_sha=head)
     return head, sha256_file(lock_path), lock
 
 
@@ -946,6 +952,14 @@ def verify_panel_lock(panel: dict, repo: str | Path | None = None) -> tuple[str,
         raise ValueError("scientific panel dimensions do not match the run lock")
     if int(panel.get("selection_mode", np.asarray(0))) != 1:
         raise ValueError("scientific panel did not use selected-interior sampling")
+    namespace = bytes(panel.get("selection_seed_namespace", np.empty(0, dtype=np.uint8)).tolist()).decode(
+        "utf-8"
+    )
+    seed_root = bytes(panel.get("selection_seed_root", np.empty(0, dtype=np.uint8)).tolist()).decode(
+        "ascii"
+    )
+    if namespace or seed_root != head:
+        raise ValueError("scientific panel seed domain does not match clean HEAD")
     if (
         int(panel.get("selection_max_core_candidates", -1))
         != settings["max_core_candidates"]

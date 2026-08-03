@@ -8,6 +8,7 @@ class DecisionInputs:
     instrument_pass: bool
     identifiable: bool
     mapping_pass: bool
+    reconstruction_confirmation_pass: bool
     canary_intervals: tuple[tuple[float, float], tuple[float, float]]
     slope_intervals: tuple[tuple[float, float], tuple[float, float]]
     nrmse_upper: tuple[float, float]
@@ -48,13 +49,17 @@ def decide_primary(inputs: DecisionInputs) -> Decision:
     if not all(lo >= -0.15 and lo <= 0.0 <= hi and hi <= 0.15 for lo, hi in inputs.canary_intervals):
         return Decision("INCONCLUSIVE_CANARY", "the continuation-swap canary did not collapse")
 
-    compatible = all(lo >= 0.8 and hi <= 1.2 for lo, hi in inputs.slope_intervals)
-    compatible = compatible and all(value <= 0.35 for value in inputs.nrmse_upper)
-    if compatible:
-        return Decision("COMPATIBLE_ON_TESTED_REGIME", "both banks satisfy the locked compatibility gates")
-
     below = all(hi < 0.8 for _lo, hi in inputs.slope_intervals)
     above = all(lo > 1.2 for lo, _hi in inputs.slope_intervals)
     if below or above:
         return Decision("INCOMPATIBLE_ON_TESTED_REGIME", "both banks place the primary slope outside the locked band")
+    compatible = all(lo >= 0.8 and hi <= 1.2 for lo, hi in inputs.slope_intervals)
+    compatible = compatible and all(value <= 0.35 for value in inputs.nrmse_upper)
+    if compatible and not inputs.reconstruction_confirmation_pass:
+        return Decision(
+            "INCONCLUSIVE_RECONSTRUCTION",
+            "coordinate gates passed but exact-evidence reconstruction did not confirm",
+        )
+    if compatible:
+        return Decision("COMPATIBLE_ON_TESTED_REGIME", "both banks satisfy the locked compatibility gates")
     return Decision("INCONCLUSIVE", "the estimates do not meet a preregistered terminal rule")

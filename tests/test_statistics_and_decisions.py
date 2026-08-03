@@ -1,5 +1,6 @@
 import numpy as np
 
+from pfn_dag_verify.analysis import _mapping_block
 from pfn_dag_verify.decision import DecisionInputs, decide_primary
 from pfn_dag_verify.statistics import (
     crossed_bootstrap_slope,
@@ -45,6 +46,7 @@ def _decision(**overrides):
         instrument_pass=True,
         identifiable=True,
         mapping_pass=True,
+        reconstruction_confirmation_pass=True,
         canary_intervals=((-0.04, 0.04), (-0.05, 0.03)),
         slope_intervals=((0.90, 1.08), (0.88, 1.10)),
         nrmse_upper=(0.20, 0.22),
@@ -57,6 +59,31 @@ def test_decision_rules_are_fail_closed():
     assert _decision().code == "COMPATIBLE_ON_TESTED_REGIME"
     assert _decision(slope_intervals=((0.40, 0.60), (0.45, 0.62))).code == "INCOMPATIBLE_ON_TESTED_REGIME"
     assert _decision(mapping_pass=False).code == "INCONCLUSIVE_MAPPING"
+    assert _decision(reconstruction_confirmation_pass=False).code == "INCONCLUSIVE_RECONSTRUCTION"
+    assert _decision(
+        reconstruction_confirmation_pass=False,
+        slope_intervals=((0.40, 0.60), (0.45, 0.62)),
+    ).code == "INCOMPATIBLE_ON_TESTED_REGIME"
     assert _decision(identifiable=False).code == "INCONCLUSIVE_IDENTIFIABILITY"
     assert _decision(canary_intervals=((-0.2, 0.03), (-0.05, 0.03))).code == "INCONCLUSIVE_CANARY"
     assert _decision(slope_intervals=((0.75, 0.95), (0.90, 1.10))).code == "INCONCLUSIVE"
+
+
+def test_future_mapping_gate_does_not_prejudge_tempered_evidence_gain():
+    groups, continuations = 4, 4
+    panel = {"eligible_replace": np.ones((groups, continuations), dtype=np.uint8)}
+    shard = {
+        "boundary_base": np.zeros(groups, dtype=np.uint8),
+        "boundary_target": np.zeros((groups, continuations), dtype=np.uint8),
+        "g_base": np.linspace(-0.4, 0.4, groups),
+        "kl_g_base": np.linspace(-0.4, 0.4, groups),
+        "g_target": np.zeros((groups, continuations)),
+        "kl_g_target": np.zeros((groups, continuations)),
+        "mix_residual_base": np.zeros(groups),
+        "mix_residual_target": np.zeros((groups, continuations)),
+        # A tempered on-segment readout can fail exact unit-gain reconstruction.
+        "reconstruction_replace": np.full((groups, continuations), 0.2),
+    }
+    block = _mapping_block(panel, [shard], bank_index=0, contrast="replace")
+    assert block["pass"] is True
+    assert block["identity_reconstruction_residual"]["median"] == 0.2

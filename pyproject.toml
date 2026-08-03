@@ -21,6 +21,8 @@ test = ["pytest==9.1.1"]
 pfn-dag-panel = "pfn_dag_verify.evaluation:main"
 pfn-dag-analyze = "pfn_dag_verify.analysis:main"
 pfn-dag-seal = "pfn_dag_verify.seal:main"
+pfn-dag-map-qualify = "pfn_dag_verify.mapping_qualification:main"
+pfn-dag-map-seal = "pfn_dag_verify.qualification_seal:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

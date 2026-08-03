@@ -44,7 +44,9 @@ def load_numeric_npz(path: str | Path) -> dict[str, np.ndarray]:
 def write_json_atomic(path: str | Path, value: dict) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+    payload = (
+        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode()
     with tempfile.NamedTemporaryFile(
         dir=target.parent, prefix=target.name + ".", suffix=".tmp", delete=False
     ) as handle:
