@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "scope": "macOS arm64 local scientific runtime",
+  "python_executable": {
+    "sha256": "d7ebf5e0d329a2fd9d4988ea2b79950eaf258158ddc899e09e22f92af6367eff",
+    "size": 33816,
+    "version": "3.11.7"
+  },
+  "distributions": {
+    "numpy": {
+      "record_sha256": "015917d522179dbd0a4a71170187dc6e3022131fe0751be367bc5dcb2caef98b",
+      "record_size": 115347,
+      "version": "1.26.4"
+    },
+    "scipy": {
+      "record_sha256": "b7499bfe419a29c973f00d702f614e32052a847e2ea1f8ccac6153a125c28249",
+      "record_size": 177183,
+      "version": "1.12.0"
+    },
+    "scikit-learn": {
+      "record_sha256": "73f98b892fcb47f5117ef7771496f31e27b9ff4688577a2cbbb5aa45700b949f",
+      "record_size": 127679,
+      "version": "1.6.1"
+    },
+    "torch": {
+      "record_sha256": "55a44e20037c4c989bc8709667f26387277279ea9872a1b42d028872a238a81c",
+      "record_size": 1438966,
+      "version": "2.9.1"
+    }
+  },
+  "portability_limit": "This fingerprints the installed local runtime. It is not a cross-platform wheel lock or container digest."
+}

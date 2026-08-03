@@ -1,0 +1,22 @@
+{
+  "bank_role": "sensitivity",
+  "legacy_file": "artifacts/legacy/stage1_functional_law.py",
+  "legacy_sha256": "5c34f73669e5709200a59aba748c9ddb05c81d5f0834dcc2d3e64722e940314e",
+  "max_ell_error": 0.0,
+  "max_f0_error": 6.522560269672795e-16,
+  "max_f1_error": 7.216449660063518e-16,
+  "n_contexts": 8,
+  "pass": true,
+  "producer_sha256": "9d4a12af79e4810d7dc94cd1a2e24765579bdea128c8b355e5c93ce49083ec83",
+  "queries": [
+    -3.75,
+    -2.25,
+    -1.25,
+    -0.25,
+    0.25,
+    1.25,
+    2.25,
+    3.75
+  ],
+  "schema_version": 1
+}

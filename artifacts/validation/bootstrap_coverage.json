@@ -1,0 +1,40 @@
+{
+  "bootstraps_per_dataset": 1000,
+  "datasets_per_slope": 500,
+  "groups": 256,
+  "pass": true,
+  "percentile_interval": [
+    0.02,
+    0.98
+  ],
+  "producer_sha256": "05b7f10c27d0727f49cca233f0b54f02c3fb58be968365434b016ffeccb59ed9",
+  "results": {
+    "0.8": {
+      "coverage": 0.94,
+      "coverage_wilson_95": [
+        0.9156384216937552,
+        0.9576519139990498
+      ],
+      "mean_interval_width": 0.20670251276511475
+    },
+    "1.0": {
+      "coverage": 0.948,
+      "coverage_wilson_95": [
+        0.9248983617059371,
+        0.9642699800903735
+      ],
+      "mean_interval_width": 0.20627869954073141
+    },
+    "1.2": {
+      "coverage": 0.944,
+      "coverage_wilson_95": [
+        0.9202547013596158,
+        0.9609746373849419
+      ],
+      "mean_interval_width": 0.20580029552469103
+    }
+  },
+  "schema_version": 1,
+  "validation_seed": 850002,
+  "wall_seconds": 35.53508216608316
+}

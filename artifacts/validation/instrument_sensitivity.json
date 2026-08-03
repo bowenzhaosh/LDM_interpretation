@@ -1,0 +1,35 @@
+{
+  "bank_role": "sensitivity",
+  "canary_interval": [
+    -0.05019838847977404,
+    0.05269127782624345
+  ],
+  "coordinate_kl_g_median": 5.818399695378673e-08,
+  "coordinate_kl_g_p95": 3.40514126473401e-07,
+  "degenerate_endpoint_fails_closed": true,
+  "exact_reconstruction_residual": 0.0,
+  "max_coordinate_weight_error": 1.4432899320127035e-15,
+  "max_kl_weight_error": 3.9947138708029684e-08,
+  "max_label_swap_error": 3.419486915845482e-14,
+  "max_scalar_vector_ell_error": 0.0,
+  "max_scalar_vector_endpoint_error": 1.1102230246251565e-16,
+  "max_tempered_intercept_error": 1.196702869515572e-15,
+  "max_tempered_slope_error": 6.661338147750939e-16,
+  "oracle_grid_size": 3097,
+  "pass": true,
+  "producer_sha256": "05b7f10c27d0727f49cca233f0b54f02c3fb58be968365434b016ffeccb59ed9",
+  "quadrature": 15,
+  "query_bank": [
+    -3.75,
+    -2.25,
+    -1.25,
+    -0.25,
+    0.25,
+    1.25,
+    2.25,
+    3.75
+  ],
+  "schema_version": 1,
+  "unit_contexts": 64,
+  "wall_seconds": 19.39730470906943
+}

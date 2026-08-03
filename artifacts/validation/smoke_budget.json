@@ -1,0 +1,38 @@
+{
+  "candidate_block_count": 8089,
+  "candidate_core_count": 22,
+  "components": {
+    "derive_wall_seconds": 0.03344283299520612,
+    "derived_bytes": 33589,
+    "measured_peak_rss_bytes": 413024256,
+    "panel_bytes": 3365284,
+    "panel_wall_seconds": 21.056435499922372,
+    "prediction_bytes": 946528,
+    "score_wall_seconds": 1.2330334580037743
+  },
+  "eligible_replace_rows": 64,
+  "max_blocks_per_core": 512,
+  "max_core_candidates": 2000,
+  "measurement_wall_seconds": 22.334525541984476,
+  "memory_cap_bytes": 17179869184,
+  "min_within_group_sd": 0.25,
+  "pass": true,
+  "prediction_shards": 4,
+  "producer_sha256": "8fa2e7ef474021f297f4bf8f75ac7f976208dff8ca83b3871077b9c5726d5108",
+  "projected_peak_rss_bytes": 1652031488,
+  "projected_raw_bytes": 774993440,
+  "projected_wall_seconds": 1652.8022462362424,
+  "projection_multipliers": {
+    "group_ratio": 32.0,
+    "safety_factor": 1.25,
+    "shard_ratio": 16.0
+  },
+  "raw_cap_bytes": 2147483648,
+  "schema_version": 1,
+  "smoke_commit": "5b0c0e5b0c0e5b0c0e5b0c0e5b0c0e5b0c0e5b0c",
+  "smoke_continuations": 8,
+  "smoke_groups": 8,
+  "smoke_kind": "interior-selected-end-to-end-v3",
+  "smoke_stream_label": "smoke-v3",
+  "wall_cap_seconds": 2700
+}
