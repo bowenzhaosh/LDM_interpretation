@@ -1,10 +1,36 @@
 # Phase-1 ordering-use replication preregistration
 
-Status: **CALIBRATION COMPLETE; CONFIRMATORY PROTOCOL NOT YET LOCKED**
+Status: **CORRECTED CROSS-BANK REQUALIFICATION REQUIRED; CONFIRMATORY RUN PAUSED**
+
+Pre-confirmation code audit found that the version-1 ordering ablation was
+misimplemented after top-K truncation. Within-ordering weights were divided by
+the full-bank normalizer, so unequal retained masses leaked into the final
+ordering mixture. The calibration and qualification therefore compared two
+truncations of the same wrong ablated estimator. Their artifacts remain sealed
+as a historical flawed-estimator record, but they do not qualify the intended
+uniform-ordering reference and cannot authorize confirmation.
+
+The corrected version normalizes each retained within-ordering posterior to
+one before mixing all 24 orderings uniformly. Qualification v2 was frozen but
+blocked before execution when a numerical audit found that its inherited
+quadrature was not sufficiently qualified. The prospective replacement is
+frozen in `PHASE1_ORDERING_QUALIFICATION_V3_PREREG.md`. It uses another fresh
+context namespace, the same three intended confirmatory atom banks, and an
+explicit production-versus-reference quadrature axis. No PFN checkpoint or
+scientific endpoint may be evaluated until qualification v3 passes.
 
 The registered calibration at commit `e679e74930fc990dc834e0a03aec0a10b582a862`
 passed and selected `T_atom = 8,192` against the 32,768-atom reference. No PFN
 checkpoint or scientific endpoint was evaluated during calibration.
+
+The superseded three-bank qualification at commit
+`cdd541c2ac7038b5cb8c7c6d3f1f6ac1811e4b88` rejected 8,192 because 16
+individual held-out log-probability changes exceeded the frozen `0.009`-nat
+boundary. It selected `T_atom = 16,384`, which had zero JS or log-probability
+exceedances across all 48 registered families. An independent raw-array
+recomputation reproduced that decision. Qualification also evaluated no PFN
+checkpoint or scientific endpoint. These numerical statements describe only
+the flawed version-1 estimator and carry no truncation-qualification force.
 
 This protocol is for the first output-level claim that remains scientifically
 independent of the failed Phase-2 induced-coordinate instrument. No projected
@@ -47,6 +73,11 @@ within-ordering covariance posterior and forcing the posterior over all 24
 orderings to be uniform. The primary ordering-specific contrast is
 
 `Delta(t) = deficit_C(t) - deficit_N(t)`.
+
+Also define `gap_P(t) = E[NLL_net,P(t) - NLL_full,P]` and
+`V_P = E[NLL_ablated,P - NLL_full,P]`. Before aggregation, every row, model,
+and checkpoint must satisfy the float64 algebra identity
+`deficit = gap - V` within absolute error `1e-12`.
 
 For each prior, the deficit is first averaged equally over its three fixed
 models and then over fresh held-out contexts. The `C` and `N` training seed
@@ -131,25 +162,28 @@ for the full and ablated context posteriors.
 
 The predictive quadrature is aligned to the native 100 output bins. Interior
 bins use Gauss-Legendre quadrature, while the two clipped edge bins use a
-semi-infinite change of variables. No missing tail mass is renormalized away.
+semi-infinite change of variables. The conditional predictive is normalized
+across the 100 bins, so normalization alone is not a convergence check.
+Qualification v3 directly compares every production-grid vector with a
+higher-order reference.
 
-If neither candidate passes, stop. Calibration artifacts persist only the
-allowed convergence, retention, ESS, normalization, timing, and memory
-diagnostics. They do not retain contexts, queries, outcomes, outcome bins,
-ordering labels, or predictive arrays. After calibration, freeze the selected
-`T_atom`, checkpoint registry, source commit, exact seeds, and all tolerances in
-a confirmatory attempt file and create an annotated local attempt tag before
-generating confirmatory contexts.
+If neither candidate passes, stop. The historical version-1 calibration
+retained only derived diagnostics. Qualification v3 instead retains native
+predictive arrays, outcome bins, and explicit grid/truncation axes so an
+independent implementation can reconstruct every numerical gate. It still
+contains no PFN output and computes no scientific deficit. After qualification,
+freeze the selected `T_atom`, checkpoint registry, source commit, exact seeds,
+and all tolerances in a confirmatory attempt file and create an annotated local
+attempt tag before generating confirmatory contexts.
 
-The first calibration used 32 contexts per prior and one atom bank. It selects
-the candidate under the registered finite-sample rule, but it is not by itself
-a population-tail or cross-bank guarantee. Before any confirmatory context is
-generated, the selected ladder is therefore qualified on the three atom banks
-that will be frozen for confirmation. Qualification uses 160 fresh contexts
-per prior per bank from the explicit seeds `880903000..880903002` for `C` and
-`880913000..880913002` for `N`; these contexts are never reused in confirmation.
-Both 8,192 and 16,384 are compared directly with 32,768. The lowest candidate
-must pass every aggregate threshold above for every bank, prior, and predictor.
+The first calibration used 32 contexts per prior and one atom bank. Version 1
+then used seeds `880903000..880913002`, but both used the subsequently rejected
+ablated estimator. Version 2 was blocked before execution by the quadrature
+audit. Qualification v3 uses 160 fresh contexts per prior and bank from C seeds
+`880943000..880943002` and N seeds `880953000..880953002`; these contexts are
+never reused in confirmation. Both 8,192 and 16,384 are compared directly with
+32,768 on the 32/128 production grid. The lowest candidate must pass every
+aggregate threshold above for every bank, prior, and predictor.
 In addition, no individual context may exceed the strict p95 boundary of
 `9e-4` JS or `0.009` nats absolute held-out log-probability change in any of the
 48 candidate × bank × prior × predictor × metric families. With 160
@@ -160,6 +194,9 @@ common 4,096-atom canary from seed `881103999`; disagreement between canary
 hashes invalidates the qualification. A resumed shard must reproduce its
 recorded full-bank hash before any partial diagnostic is reused. If neither
 candidate qualifies, stop without generating confirmatory contexts.
+The separate v3 quadrature gate in
+`PHASE1_ORDERING_QUALIFICATION_V3_PREREG.md` must also pass at all three
+truncation levels against the 64/256 reference grid.
 
 ## Confirmatory validity gates
 
@@ -169,25 +206,44 @@ Every gate must pass before the primary contrast is interpreted.
    checkpoint hashes, 18 expected prior × evaluation-draw × atom-bank shards,
    and no unexpected shard.
 2. **Inference guards:** finite normalized probabilities; exact output shape;
-   batch-size replay within `1e-6`; context-row permutation replay within
-   `1e-5`; no fallback checkpoint load.
+   no fallback checkpoint load; and replay on every registered checkpoint.
+   The replay panel is the first eight `shard_local_index` rows from each of the
+   nine matching-prior draw × bank strata, giving 72 rows per checkpoint.
+   Native 100-bin log-probabilities from singleton inference, production
+   batches of 64, and reverse-batch-order inference must agree after restoring
+   row order within max absolute error `1e-6`. A cyclic context-row permutation
+   `roll(arange(30), 7)` must agree with the unpermuted output within max
+   absolute log-probability error `1e-5`. The production scorer uses batch size
+   64. Every stored log-probability vector must reconstruct normalization within
+   `1e-6`.
 3. **Predictive truncation:** the frozen calibration comparison passes for both
-   full and ablated predictors under `C` and `N`; its verified marker selects
-   `T_atom = 8,192` against the 32,768 reference.
+   full and ablated predictors under `C` and `N`; the v3 verified marker selects
+   the lowest globally passing value from 8,192 or 16,384 against the 32,768
+   reference, and every v3 quadrature gate passes. The selected value is not
+   fixed until those held-out oracle-only results exist.
 4. **Monte Carlo diagnostics:** collapsed covariance-atom ESS and context
    retained-mass distributions are reported. They are not substituted for the
    predictive-convergence gate.
 5. **Ordering value:** with
    `V_P = E[NLL_ablated,P - NLL_full,P]`, the one-sided 95% context-bootstrap
    lower bound for `V_C` is positive. For the Gaussian null, the entire
-   two-sided 95% context-bootstrap CI for `V_N` must lie inside the frozen
-   equivalence interval `[-1e-5, +1e-5]` nats. This equivalence margin is
+   two-sided 95% context-bootstrap CI for `V_N` must lie inclusively inside the
+   frozen equivalence interval `[-1e-5, +1e-5]` nats: the lower endpoint is at
+   least `-1e-5` and the upper endpoint is at most `+1e-5`. This margin is
    800-fold smaller than the primary effect floor and replaces the invalid
    “within two SE” rule.
-6. **Oracle convergence:** on the frozen nested-half subset, the absolute
-   full-bank versus half-bank change in the control-subtracted ablated NLL is
-   below 0.004 nats. The full-predictive atom check must also satisfy the legacy
-   20%-of-final-gap rule.
+6. **Oracle convergence:** the nested-half subset is exactly evaluation draw 0,
+   original stream indices `0..199`, separately for each prior. This gives 200
+   rows per prior, allocated across atom banks by the same `stream_index % 3`
+   rule as the full panel. For this subset define
+   `d_P = mean(NLL_ablated,3M - NLL_ablated,1.5M)`. The gate requires
+   `abs(d_C - d_N) < 0.004` nats. Also define
+   `e_P = mean(NLL_full,3M - NLL_full,1.5M)` and
+   `g_P = mean_models mean(NLL_net,final - NLL_full,3M)` on these same rows,
+   with equal weight on the three fixed models. Separately for `C` and `N`, the
+   full-predictive atom gate requires `g_P > 0` and
+   `abs(e_P) < 0.20 * g_P`. The 1.5M calculation uses the first 1,500,000 atoms
+   of the same registered 3M bank and reselects top `T_atom` within that prefix.
 7. **KL alarm:** for each prior, the final-checkpoint fixed-fleet mean
    `NLL_net - NLL_full` must not have a two-sided 95% CI wholly below `-0.004`
    nats. A stronger apparent improvement over the approximate full oracle is
@@ -206,8 +262,13 @@ three fixed models and all checkpoints. Evaluation draws, atom banks, and
 training models are fixed and are not resampled. The three models in each arm
 receive equal weight. Intervals are percentile intervals using NumPy's linear
 quantile convention at `[0.025, 0.975]`; the `V_C` lower gate uses the 0.05
-quantile. Shard and draw relabeling must leave every estimate and decision
-unchanged.
+quantile. Each stratum has an independent `PCG64` generator initialized by
+`SeedSequence([881003900, prior_code, evaluation_seed, atom_seed])`. Bootstrap
+indices are generated in canonical replicate order in chunks of 256; the final
+short chunk contains 80 replicates. The same within-stratum indices are reused
+for every model and checkpoint. The SHA-256 of each generated index stream is
+retained. Shard and draw display-label relabeling, file-discovery order, model
+order, and row storage order must leave every estimate and decision unchanged.
 
 ## Decision rules
 

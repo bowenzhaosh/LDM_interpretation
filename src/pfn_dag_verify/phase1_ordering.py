@@ -124,6 +124,69 @@ def production_qualification_protocol(bank_index: int) -> dict[str, Any]:
     return protocol
 
 
+def production_qualification_protocol_v2(bank_index: int) -> dict[str, Any]:
+    """Corrected, replayable qualification for the uniform-ordering ablation.
+
+    Version 1 was run before a pre-confirmation audit found that top-K retained
+    mass leaked back into the ordering weights.  Version 2 keeps the same atom
+    banks but uses fresh contexts and archives the native predictive arrays so
+    an implementation-independent verifier can recompute every diagnostic.
+    """
+
+    if bank_index not in {0, 1, 2}:
+        raise ValueError("qualification bank_index must be 0, 1, or 2")
+    protocol = production_qualification_protocol(bank_index)
+    protocol.update(
+        {
+            "qualification_protocol_version": 2,
+            "calibration_seed_root": 880_923_000 + bank_index,
+            "calibration_seed_namespace": (
+                f"phase1-ordering-cross-bank-qualification-v2-bank{bank_index}"
+            ),
+            "ablation_weighting": (
+                "uniform-over-orderings-after-within-order-topk-normalization-v1"
+            ),
+            "archive_predictive_arrays": True,
+            "qualification_preregistration": (
+                "PHASE1_ORDERING_QUALIFICATION_V2_PREREG.md"
+            ),
+        }
+    )
+    return protocol
+
+
+def production_qualification_protocol_v3(bank_index: int) -> dict[str, Any]:
+    """Prospective high-order quadrature qualification after v2 was blocked."""
+
+    protocol = production_qualification_protocol_v2(bank_index)
+    protocol.update(
+        {
+            "qualification_protocol_version": 3,
+            "calibration_seed_root": 880_943_000 + bank_index,
+            "calibration_seed_namespace": (
+                f"phase1-ordering-cross-bank-qualification-v3-bank{bank_index}"
+            ),
+            "quadrature_interior_nodes": 32,
+            "quadrature_tail_nodes": 128,
+            "quadrature_reference_interior_nodes": 64,
+            "quadrature_reference_tail_nodes": 256,
+            "quadrature_qualification": {
+                "js_max": 1e-7,
+                "reference_probability_floor": 1e-8,
+                "max_bin_abs_logp_change_max": 5e-4,
+                "reference_weighted_abs_logp_change_max": 1e-4,
+                "max_bin_abs_ordering_value_change_max": 5e-4,
+            },
+            "oracle_internal_dtype": "float64",
+            "qualification_preregistration": (
+                "PHASE1_ORDERING_QUALIFICATION_V3_PREREG.md"
+            ),
+            "required_source_tag": "phase1-ordering-qualification-v3",
+        }
+    )
+    return protocol
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -406,6 +469,7 @@ class OrderingOracle:
         atoms: np.ndarray,
         device: torch.device,
         context_atom_batch: int = 250_000,
+        compute_dtype: torch.dtype = torch.float32,
     ) -> None:
         if atoms.ndim != 3 or atoms.shape[1:] != (4, 4):
             raise ValueError(f"expected atoms with shape (M,4,4), got {atoms.shape}")
@@ -415,14 +479,18 @@ class OrderingOracle:
         self.context_atom_batch = int(context_atom_batch)
         if self.context_atom_batch <= 0:
             raise ValueError("context_atom_batch must be positive")
+        if compute_dtype not in {torch.float32, torch.float64}:
+            raise ValueError("oracle compute_dtype must be float32 or float64")
+        self.compute_dtype = compute_dtype
+        numpy_dtype = np.float64 if compute_dtype == torch.float64 else np.float32
         orderings = np.asarray(fleet.ORDERINGS, dtype=np.int64)
         self.n_orderings = len(orderings)
-        u = np.empty((self.n_orderings, self.atom_count, 4, 4), dtype=np.float32)
-        b = np.empty((self.n_orderings, self.atom_count, 4), dtype=np.float32)
+        u = np.empty((self.n_orderings, self.atom_count, 4, 4), dtype=numpy_dtype)
+        b = np.empty((self.n_orderings, self.atom_count, 4), dtype=numpy_dtype)
         for index, ordering in enumerate(fleet.ORDERINGS):
             _, ui, bi = fleet.params_for(atoms, ordering)
-            u[index] = np.asarray(ui, dtype=np.float32)
-            b[index] = np.asarray(bi, dtype=np.float32)
+            u[index] = np.asarray(ui, dtype=numpy_dtype)
+            b[index] = np.asarray(bi, dtype=numpy_dtype)
         self.u = torch.from_numpy(u).to(device)
         self.b = torch.from_numpy(b).to(device)
         self.orderings = torch.from_numpy(orderings).long().to(device)
@@ -431,7 +499,7 @@ class OrderingOracle:
     def context_log_likelihood(
         self, context: np.ndarray, r: float, gaussian: bool
     ) -> torch.Tensor:
-        data = torch.as_tensor(context, dtype=torch.float32, device=self.device)
+        data = torch.as_tensor(context, dtype=self.compute_dtype, device=self.device)
         if data.shape != (30, 4):
             raise ValueError(f"expected one (30,4) context, got {tuple(data.shape)}")
         result = torch.empty(
@@ -487,6 +555,24 @@ class OrderingOracle:
             kept_values.append(row[indices])
         return torch.stack(kept_values), torch.stack(kept_indices)
 
+    @staticmethod
+    def _uniform_ablated_log_weights(kept_log_likelihood: torch.Tensor) -> torch.Tensor:
+        """Normalize each truncated ordering posterior before uniform mixing."""
+
+        if kept_log_likelihood.ndim != 2 or kept_log_likelihood.shape[1] == 0:
+            raise ValueError("ablated weights require a nonempty ordering-by-atom matrix")
+        kept_log_z = torch.logsumexp(kept_log_likelihood.double(), dim=1, keepdim=True)
+        weights = kept_log_likelihood.double() - kept_log_z
+        normalization = torch.logsumexp(weights, dim=1)
+        if not torch.allclose(
+            normalization,
+            torch.zeros_like(normalization),
+            rtol=0.0,
+            atol=1e-12,
+        ):
+            raise RuntimeError("ordering-ablated weights are not normalized per ordering")
+        return weights
+
     @torch.no_grad()
     def predict_from_log_likelihood(
         self,
@@ -523,20 +609,26 @@ class OrderingOracle:
         kept_u = self.u[ordering_rows, kept_indices]
         kept_b = self.b[ordering_rows, kept_indices]
         full_weights = kept_ll
-        ablated_weights = kept_ll - log_z[:, None]
+        ablated_weights = self._uniform_ablated_log_weights(kept_ll)
         n_values = len(quadrature_values)
         full_log_numerator = np.empty(n_values, dtype=np.float64)
         ablated_log_numerator = np.empty(n_values, dtype=np.float64)
         chunk_size = int(query_grid_chunk)
         if chunk_size <= 0:
             raise ValueError("query_grid_chunk must be positive")
-        query_tensor = torch.as_tensor(query, dtype=torch.float32, device=self.device)
+        query_tensor = torch.as_tensor(
+            query, dtype=self.compute_dtype, device=self.device
+        )
         for start in range(0, n_values, chunk_size):
             stop = min(n_values, start + chunk_size)
             values = torch.as_tensor(
-                quadrature_values[start:stop], dtype=torch.float32, device=self.device
+                quadrature_values[start:stop],
+                dtype=self.compute_dtype,
+                device=self.device,
             )
-            points = torch.empty((len(values), 4), dtype=torch.float32, device=self.device)
+            points = torch.empty(
+                (len(values), 4), dtype=self.compute_dtype, device=self.device
+            )
             points[:, :3] = query_tensor[None, :]
             points[:, 3] = values
             permuted_points = points[:, self.orderings].permute(1, 0, 2)
@@ -646,7 +738,7 @@ def quadrature_grid(
     values.append(edges[-1] + u / (1.0 - u))
     weights.append(base_tail_weight)
     bins.append(np.full(tail_nodes, int(fleet.N_BINS) - 1, dtype=np.int64))
-    value_array = np.concatenate(values).astype(np.float32)
+    value_array = np.concatenate(values).astype(np.float64)
     weight_array = np.concatenate(weights).astype(np.float64)
     bin_array = np.concatenate(bins).astype(np.int64)
     if np.any(weight_array <= 0) or not np.all(np.isfinite(weight_array)):
@@ -819,6 +911,32 @@ def _git_provenance(require_clean: bool) -> dict[str, Any]:
     return {"commit": commit, "dirty": bool(status), "status": status.splitlines()}
 
 
+def _verify_annotated_tag(tag: str, commit: str) -> None:
+    if not tag or any(character.isspace() for character in tag):
+        raise RuntimeError("required source tag is invalid")
+    tag_ref = f"refs/tags/{tag}"
+    tag_type = subprocess.run(
+        ["git", "cat-file", "-t", tag_ref],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    if tag_type != "tag":
+        raise RuntimeError(f"required source tag is not annotated: {tag}")
+    tagged_commit = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{tag_ref}^{{commit}}"],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    if tagged_commit != commit:
+        raise RuntimeError(
+            f"required source tag {tag} resolves to {tagged_commit}, not {commit}"
+        )
+
+
 def _source_inventory(
     config_path: Path, fleet_path: Path, extra_paths: tuple[Path, ...] = ()
 ) -> dict[str, str]:
@@ -840,11 +958,14 @@ def _memory_preflight(
     truncation: int,
     grid_chunk: int,
     context_atom_batch: int,
+    oracle_element_bytes: int,
 ) -> dict[str, int | float]:
-    resident = 24 * atom_count * (4 * 4 + 4) * 4
-    likelihood = 24 * atom_count * 4
+    if oracle_element_bytes not in {4, 8}:
+        raise ValueError("oracle_element_bytes must be four or eight")
+    resident = 24 * atom_count * (4 * 4 + 4) * oracle_element_bytes
+    likelihood = 24 * atom_count * 8
     predictive = 6 * 24 * truncation * 4 * grid_chunk * 8
-    context = 3 * context_atom_batch * 4 * 30 * 4
+    context = 3 * context_atom_batch * 4 * 30 * oracle_element_bytes
     estimate = resident + likelihood + predictive + context
     total = 0
     if device.type == "cuda":
@@ -938,8 +1059,10 @@ def _partial_arrays(
     candidate_count: int,
     context_count: int,
     identity_sha256: str,
+    prediction_bin_count: int | None = None,
+    archive_quadrature_reference: bool = False,
 ) -> dict[str, np.ndarray]:
-    return {
+    arrays = {
         "attempt_identity_sha256": np.frombuffer(
             bytes.fromhex(identity_sha256), dtype=np.uint8
         ).copy(),
@@ -971,6 +1094,63 @@ def _partial_arrays(
             (candidate_count, context_count), np.nan, dtype=np.float64
         ),
     }
+    if prediction_bin_count is not None:
+        if prediction_bin_count <= 1:
+            raise ValueError("prediction_bin_count must exceed one")
+        arrays.update(
+            {
+                "outcome_bins": np.full(context_count, -1, dtype=np.int64),
+                "full_probability": np.full(
+                    (level_count, context_count, prediction_bin_count),
+                    np.nan,
+                    dtype=np.float64,
+                ),
+                "ablated_probability": np.full(
+                    (level_count, context_count, prediction_bin_count),
+                    np.nan,
+                    dtype=np.float64,
+                ),
+            }
+        )
+    if archive_quadrature_reference:
+        if prediction_bin_count is None:
+            raise ValueError("quadrature archival requires predictive-array archival")
+        arrays.update(
+            {
+                "quadrature_grid_full_probability": np.full(
+                    (2, level_count, context_count, prediction_bin_count),
+                    np.nan,
+                    dtype=np.float64,
+                ),
+                "quadrature_grid_ablated_probability": np.full(
+                    (2, level_count, context_count, prediction_bin_count),
+                    np.nan,
+                    dtype=np.float64,
+                ),
+                "quadrature_js_full": np.full(
+                    (level_count, context_count), np.nan, dtype=np.float64
+                ),
+                "quadrature_js_ablated": np.full(
+                    (level_count, context_count), np.nan, dtype=np.float64
+                ),
+                "quadrature_max_bin_abs_logp_change_full": np.full(
+                    (level_count, context_count), np.nan, dtype=np.float64
+                ),
+                "quadrature_max_bin_abs_logp_change_ablated": np.full(
+                    (level_count, context_count), np.nan, dtype=np.float64
+                ),
+                "quadrature_reference_weighted_abs_logp_change_full": np.full(
+                    (level_count, context_count), np.nan, dtype=np.float64
+                ),
+                "quadrature_reference_weighted_abs_logp_change_ablated": np.full(
+                    (level_count, context_count), np.nan, dtype=np.float64
+                ),
+                "quadrature_max_bin_abs_ordering_value_change": np.full(
+                    (level_count, context_count), np.nan, dtype=np.float64
+                ),
+            }
+        )
+    return arrays
 
 
 def _load_partial(path: Path, expected: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -1008,6 +1188,30 @@ def run_calibration(
     config_path = config_path.resolve()
     config_sha_start = _sha256_file(config_path)
     config = _load_json(config_path)
+    qualification_protocol_version = int(
+        config.get("qualification_protocol_version", 1)
+    )
+    if qualification_protocol_version == 2:
+        raise RuntimeError(
+            "qualification v2 is blocked-before-execution and superseded by v3"
+        )
+    if qualification_protocol_version == 3:
+        bank_index = int(config.get("qualification_bank_index", -1))
+        if bank_index not in {0, 1, 2}:
+            raise RuntimeError(
+                "production qualification v3 must use its frozen CLI execution path"
+            )
+        expected_protocol = production_qualification_protocol_v3(bank_index)
+        if (
+            config != expected_protocol
+            or production_protocol
+            or not strict_runtime
+            or stage_name != "phase1_ordering_cross_bank_qualification_v3"
+            or frozen_protocol != expected_protocol
+        ):
+            raise RuntimeError(
+                "production qualification v3 must use its frozen CLI execution path"
+            )
     _validate_calibration_config(config, production_protocol)
     if frozen_protocol is not None and config != frozen_protocol:
         raise ValueError("config differs from its frozen protocol")
@@ -1032,13 +1236,24 @@ def run_calibration(
         )
     if fleet_path.name != "d4_generator.py":
         raise RuntimeError("calibration requires the pinned generator-only module")
+    qualification_preregistration_path: Path | None = None
+    if "qualification_preregistration" in config:
+        qualification_preregistration_path = _resolve_repo_path(
+            str(config["qualification_preregistration"])
+        )
     extra_source_paths = (
         environment_contract_path,
         requirements_lock_path,
         cluster_wrapper_path,
-    ) + ((runtime_inventory_path,) if runtime_inventory_path is not None else ())
+    )
+    if runtime_inventory_path is not None:
+        extra_source_paths += (runtime_inventory_path,)
+    if qualification_preregistration_path is not None:
+        extra_source_paths += (qualification_preregistration_path,)
     source_inventory_start = _source_inventory(config_path, fleet_path, extra_source_paths)
     git = _git_provenance(bool(config.get("require_clean_git", False)))
+    if "required_source_tag" in config:
+        _verify_annotated_tag(str(config["required_source_tag"]), git["commit"])
     if strict_runtime and sys.version_info[:2] not in {(3, 10), (3, 11)}:
         raise RuntimeError("production calibration supports only Python 3.10 or 3.11")
     if strict_runtime:
@@ -1209,17 +1424,44 @@ def run_calibration(
     else:
         write_json_atomic(running_path, running_identity)
     atom_count = int(config["atom_count"])
+    oracle_dtype_name = str(config.get("oracle_internal_dtype", "float32"))
+    oracle_dtype_by_name = {"float32": torch.float32, "float64": torch.float64}
+    if oracle_dtype_name not in oracle_dtype_by_name:
+        raise RuntimeError(f"unsupported oracle_internal_dtype: {oracle_dtype_name}")
+    oracle_compute_dtype = oracle_dtype_by_name[oracle_dtype_name]
     memory = _memory_preflight(
         device,
         atom_count,
         reference,
         int(config["query_grid_chunk"]),
         int(config["context_atom_batch"]),
+        8 if oracle_compute_dtype == torch.float64 else 4,
     )
     fleet = load_fleet_module(fleet_path)
     quadrature_values, quadrature_bins, quadrature_log_weights = quadrature_grid(
         fleet, config
     )
+    archive_predictive_arrays = bool(config.get("archive_predictive_arrays", False))
+    qualification_protocol_version = int(
+        config.get("qualification_protocol_version", -1)
+    )
+    if archive_predictive_arrays and qualification_protocol_version not in {2, 3}:
+        raise RuntimeError("predictive-array archival is restricted to qualification v2/v3")
+    archive_quadrature_reference = qualification_protocol_version == 3
+    prediction_bin_count = int(fleet.N_BINS) if archive_predictive_arrays else None
+    reference_quadrature: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+    if archive_quadrature_reference:
+        reference_quadrature = quadrature_grid(
+            fleet,
+            {
+                "quadrature_interior_nodes": int(
+                    config["quadrature_reference_interior_nodes"]
+                ),
+                "quadrature_tail_nodes": int(
+                    config["quadrature_reference_tail_nodes"]
+                ),
+            },
+        )
     atoms_started = time.time()
     atoms = sample_sigmas_exact(
         fleet, np.random.default_rng(int(config["atom_seed"])), atom_count
@@ -1261,6 +1503,7 @@ def run_calibration(
         atoms,
         device=device,
         context_atom_batch=int(config["context_atom_batch"]),
+        compute_dtype=oracle_compute_dtype,
     )
     oracle_build_seconds = time.time() - oracle_started
 
@@ -1271,7 +1514,12 @@ def run_calibration(
     combined = {
         name: np.empty((n_prior,) + value.shape, dtype=value.dtype)
         for name, value in _partial_arrays(
-            n_level, n_candidate, n_context, identity_sha256
+            n_level,
+            n_candidate,
+            n_context,
+            identity_sha256,
+            prediction_bin_count,
+            archive_quadrature_reference,
         ).items()
     }
     probability_atol = float(config["thresholds"]["probability_sum_atol"])
@@ -1279,7 +1527,14 @@ def run_calibration(
         partial_path = output_dir / f"partial_{prior}.npz"
         partial = _load_partial(
             partial_path,
-            _partial_arrays(n_level, n_candidate, n_context, identity_sha256),
+            _partial_arrays(
+                n_level,
+                n_candidate,
+                n_context,
+                identity_sha256,
+                prediction_bin_count,
+                archive_quadrature_reference,
+            ),
         )
         stream = generate_evaluation_stream(
             fleet, prior, n_context, 30, calibration_stream_seeds[prior]
@@ -1331,6 +1586,110 @@ def run_calibration(
                     prediction.ablated.min()
                 )
             outcome_bin = int(stream["outcome_bins"][context_index])
+            if archive_predictive_arrays:
+                partial["outcome_bins"][context_index] = outcome_bin
+                partial["full_probability"][:, context_index] = np.stack(
+                    [prediction.full for prediction in predictions]
+                )
+                partial["ablated_probability"][:, context_index] = np.stack(
+                    [prediction.ablated for prediction in predictions]
+                )
+            if archive_quadrature_reference:
+                if reference_quadrature is None:
+                    raise AssertionError("qualification v3 reference grid is missing")
+                reference_grid_predictions = [
+                    oracle.predict_from_log_likelihood(
+                        likelihood,
+                        stream["queries"][context_index],
+                        r,
+                        gaussian,
+                        truncation,
+                        reference_quadrature[0],
+                        reference_quadrature[1],
+                        reference_quadrature[2],
+                        int(config["query_grid_chunk"]),
+                        probability_atol,
+                    )
+                    for truncation in levels
+                ]
+                for prediction in predictions + reference_grid_predictions:
+                    if np.any(prediction.full <= 0.0) or np.any(
+                        prediction.ablated <= 0.0
+                    ):
+                        raise RuntimeError(
+                            "qualification v3 quadrature probabilities must be strictly positive"
+                        )
+                partial["quadrature_grid_full_probability"][0, :, context_index] = (
+                    np.stack([prediction.full for prediction in predictions])
+                )
+                partial["quadrature_grid_full_probability"][1, :, context_index] = (
+                    np.stack(
+                        [prediction.full for prediction in reference_grid_predictions]
+                    )
+                )
+                partial["quadrature_grid_ablated_probability"][0, :, context_index] = (
+                    np.stack([prediction.ablated for prediction in predictions])
+                )
+                partial["quadrature_grid_ablated_probability"][1, :, context_index] = (
+                    np.stack(
+                        [prediction.ablated for prediction in reference_grid_predictions]
+                    )
+                )
+                quadrature_limits = config["quadrature_qualification"]
+                probability_floor = float(
+                    quadrature_limits["reference_probability_floor"]
+                )
+                for level_index, (
+                    production_grid_prediction,
+                    reference_grid_prediction,
+                ) in enumerate(zip(predictions, reference_grid_predictions, strict=True)):
+                    for predictor in ("full", "ablated"):
+                        production_probability = getattr(
+                            production_grid_prediction, predictor
+                        )
+                        reference_probability = getattr(
+                            reference_grid_prediction, predictor
+                        )
+                        partial[f"quadrature_js_{predictor}"][
+                            level_index, context_index
+                        ] = jensen_shannon(
+                            production_probability, reference_probability
+                        )
+                        log_change = np.abs(
+                            np.log(production_probability)
+                            - np.log(reference_probability)
+                        )
+                        active = reference_probability >= probability_floor
+                        if not np.any(active):
+                            raise RuntimeError(
+                                "quadrature reference has no bin above its floor"
+                            )
+                        partial[f"quadrature_max_bin_abs_logp_change_{predictor}"][
+                            level_index, context_index
+                        ] = float(np.max(log_change[active]))
+                        partial[
+                            f"quadrature_reference_weighted_abs_logp_change_{predictor}"
+                        ][level_index, context_index] = float(
+                            np.sum(reference_probability * log_change)
+                        )
+                    production_value = np.log(production_grid_prediction.full) - np.log(
+                        production_grid_prediction.ablated
+                    )
+                    reference_value = np.log(reference_grid_prediction.full) - np.log(
+                        reference_grid_prediction.ablated
+                    )
+                    value_active = (
+                        reference_grid_prediction.full >= probability_floor
+                    ) & (reference_grid_prediction.ablated >= probability_floor)
+                    if not np.any(value_active):
+                        raise RuntimeError(
+                            "quadrature ordering value has no bin above its floor"
+                        )
+                    partial["quadrature_max_bin_abs_ordering_value_change"][
+                        level_index, context_index
+                    ] = float(
+                        np.max(np.abs(production_value[value_active] - reference_value[value_active]))
+                    )
             for candidate_index in range(n_candidate):
                 current = predictions[candidate_index]
                 reference_prediction = predictions[-1]
@@ -1359,13 +1718,34 @@ def run_calibration(
             combined[name][prior_index] = partial[name]
 
     raw_path = output_dir / "calibration_raw.npz"
-    write_numeric_npz_atomic(
-        raw_path,
-        prior_codes=np.arange(n_prior, dtype=np.int64),
-        candidates=np.asarray(candidates, dtype=np.int64),
-        reference_truncation=np.asarray([reference], dtype=np.int64),
-        **combined,
-    )
+    raw_metadata = {
+        "prior_codes": np.arange(n_prior, dtype=np.int64),
+        "candidates": np.asarray(candidates, dtype=np.int64),
+        "reference_truncation": np.asarray([reference], dtype=np.int64),
+    }
+    if archive_quadrature_reference:
+        raw_metadata.update(
+            {
+                "quadrature_grid_interior_nodes": np.asarray(
+                    [
+                        int(config["quadrature_interior_nodes"]),
+                        int(config["quadrature_reference_interior_nodes"]),
+                    ],
+                    dtype=np.int64,
+                ),
+                "quadrature_grid_tail_nodes": np.asarray(
+                    [
+                        int(config["quadrature_tail_nodes"]),
+                        int(config["quadrature_reference_tail_nodes"]),
+                    ],
+                    dtype=np.int64,
+                ),
+                "quadrature_truncation_levels": np.asarray(
+                    levels, dtype=np.int64
+                ),
+            }
+        )
+    write_numeric_npz_atomic(raw_path, **raw_metadata, **combined)
 
     candidate_rows: list[dict[str, Any]] = []
     selected: int | None = None
@@ -1392,6 +1772,93 @@ def run_calibration(
         )
         if selected is None and passes:
             selected = candidate
+
+    quadrature_qualification: dict[str, Any] | None = None
+    if archive_quadrature_reference:
+        quadrature_limits = config["quadrature_qualification"]
+        quadrature_pass_all = True
+        prior_quadrature_rows: dict[str, Any] = {}
+        for prior_index, prior in enumerate(priors):
+            predictor_rows: dict[str, Any] = {}
+            for predictor in ("full", "ablated"):
+                max_js = float(
+                    np.max(combined[f"quadrature_js_{predictor}"][prior_index])
+                )
+                max_bin_logp = float(
+                    np.max(
+                        combined[
+                            f"quadrature_max_bin_abs_logp_change_{predictor}"
+                        ][prior_index]
+                    )
+                )
+                max_weighted_logp = float(
+                    np.max(
+                        combined[
+                            "quadrature_reference_weighted_abs_logp_change_"
+                            f"{predictor}"
+                        ][prior_index]
+                    )
+                )
+                passed = bool(
+                    max_js <= float(quadrature_limits["js_max"])
+                    and max_bin_logp
+                    <= float(quadrature_limits["max_bin_abs_logp_change_max"])
+                    and max_weighted_logp
+                    <= float(
+                        quadrature_limits[
+                            "reference_weighted_abs_logp_change_max"
+                        ]
+                    )
+                )
+                quadrature_pass_all = quadrature_pass_all and passed
+                predictor_rows[predictor] = {
+                    "max_js": max_js,
+                    "max_bin_abs_logp_change": max_bin_logp,
+                    "max_reference_weighted_abs_logp_change": max_weighted_logp,
+                    "pass": passed,
+                }
+            max_ordering_value_change = float(
+                np.max(
+                    combined[
+                        "quadrature_max_bin_abs_ordering_value_change"
+                    ][prior_index]
+                )
+            )
+            ordering_value_pass = bool(
+                max_ordering_value_change
+                <= float(
+                    quadrature_limits[
+                        "max_bin_abs_ordering_value_change_max"
+                    ]
+                )
+            )
+            quadrature_pass_all = quadrature_pass_all and ordering_value_pass
+            prior_quadrature_rows[prior] = {
+                "predictors": predictor_rows,
+                "max_bin_abs_ordering_value_change": max_ordering_value_change,
+                "ordering_value_pass": ordering_value_pass,
+                "pass": bool(
+                    ordering_value_pass
+                    and all(row["pass"] for row in predictor_rows.values())
+                ),
+            }
+        quadrature_qualification = {
+            "production_grid": {
+                "interior_nodes": int(config["quadrature_interior_nodes"]),
+                "tail_nodes": int(config["quadrature_tail_nodes"]),
+            },
+            "reference_grid": {
+                "interior_nodes": int(
+                    config["quadrature_reference_interior_nodes"]
+                ),
+                "tail_nodes": int(config["quadrature_reference_tail_nodes"]),
+            },
+            "limits": quadrature_limits,
+            "priors": prior_quadrature_rows,
+            "pass": quadrature_pass_all,
+        }
+        if not quadrature_pass_all:
+            selected = None
 
     if _sha256_file(config_path) != config_sha_start:
         raise RuntimeError("config changed during calibration")
@@ -1433,6 +1900,7 @@ def run_calibration(
         "decision": "CALIBRATION_PASS" if selected is not None else "CALIBRATION_FAIL",
         "selected_truncation": selected,
         "candidate_results": candidate_rows,
+        "quadrature_qualification": quadrature_qualification,
         "diagnostics": {
             prior: {
                 "median_ess_full_atoms": float(
@@ -1469,6 +1937,7 @@ def run_calibration(
         "raw_name": raw_path.name,
         "raw_sha256": _sha256_file(raw_path),
         "atom_count": atom_count,
+        "oracle_internal_dtype": oracle_dtype_name,
         "atom_build_seconds": atom_build_seconds,
         "oracle_build_seconds": oracle_build_seconds,
         "wall_seconds": time.time() - started,
@@ -1541,15 +2010,28 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.command == "qualify":
         registered = _load_json(arguments.config.resolve())
         bank_index = int(registered.get("qualification_bank_index", -1))
+        protocol_version = int(registered.get("qualification_protocol_version", 1))
+        if protocol_version == 1:
+            frozen_protocol = production_qualification_protocol(bank_index)
+            stage_name = "phase1_ordering_cross_bank_qualification"
+        elif protocol_version == 2:
+            raise RuntimeError(
+                "qualification v2 is blocked-before-execution and superseded by v3"
+            )
+        elif protocol_version == 3:
+            frozen_protocol = production_qualification_protocol_v3(bank_index)
+            stage_name = "phase1_ordering_cross_bank_qualification_v3"
+        else:
+            raise ValueError(f"unsupported qualification protocol version: {protocol_version}")
         summary = run_calibration(
             arguments.config,
             arguments.out,
             arguments.device,
             production_protocol=False,
             recover_stale_lease=arguments.recover_stale_lease,
-            frozen_protocol=production_qualification_protocol(bank_index),
+            frozen_protocol=frozen_protocol,
             strict_runtime=True,
-            stage_name="phase1_ordering_cross_bank_qualification",
+            stage_name=stage_name,
         )
         print(json.dumps(summary, indent=2, sort_keys=True, allow_nan=False))
         return 0

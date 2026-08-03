@@ -5,6 +5,7 @@ import json
 import importlib.util
 from pathlib import Path
 import socket
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,7 +16,9 @@ from pfn_dag_verify.phase1_ordering import (
     PRODUCTION_CALIBRATION_PROTOCOL,
     _acquire_attempt_lease,
     _calibration_candidate_passes,
+    _partial_arrays,
     _sha256_json,
+    _verify_annotated_tag,
     _validate_calibration_config,
     absolute_log_probability_change,
     generate_evaluation_stream,
@@ -42,6 +45,33 @@ def test_observed_bin_log_probability_change_fails_closed_on_zero():
     with pytest.raises(RuntimeError, match="finite and positive"):
         absolute_log_probability_change(candidate, reference, 0)
     assert absolute_log_probability_change(candidate, reference, 1) == 0.0
+
+
+def test_required_source_tag_uses_exact_tag_namespace_and_commit_peel(monkeypatch):
+    calls = []
+
+    def fake_run(arguments, **kwargs):
+        calls.append(arguments)
+        if arguments[1:3] == ["cat-file", "-t"]:
+            return SimpleNamespace(stdout="tag\n")
+        return SimpleNamespace(stdout="abc123\n")
+
+    monkeypatch.setattr("pfn_dag_verify.phase1_ordering.subprocess.run", fake_run)
+    _verify_annotated_tag("phase1-ordering-qualification-v3", "abc123")
+    assert calls == [
+        [
+            "git",
+            "cat-file",
+            "-t",
+            "refs/tags/phase1-ordering-qualification-v3",
+        ],
+        [
+            "git",
+            "rev-parse",
+            "--verify",
+            "refs/tags/phase1-ordering-qualification-v3^{commit}",
+        ],
+    ]
 
 
 def test_vectorized_sigma_sampler_is_bit_identical_to_frozen_sampler():
@@ -161,6 +191,45 @@ def test_deterministic_topk_breaks_cutoff_ties_by_ascending_atom_index():
     torch.testing.assert_close(first_values, second_values)
     torch.testing.assert_close(first_indices, second_indices)
     assert first_indices.tolist() == [[0, 1, 2], [1, 2, 3]]
+
+
+def test_ablated_truncation_mixes_orderings_uniformly_despite_unequal_retained_mass():
+    kept = torch.log(
+        torch.tensor(
+            [
+                [0.50, 0.25, 0.25],
+                [0.20, 0.05, 0.05],
+            ],
+            dtype=torch.float64,
+        )
+    )
+    weights = OrderingOracle._uniform_ablated_log_weights(kept)
+    per_order_mass = torch.exp(weights).sum(dim=1)
+    torch.testing.assert_close(
+        per_order_mass,
+        torch.ones(2, dtype=torch.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    global_order_mass = per_order_mass / per_order_mass.sum()
+    torch.testing.assert_close(
+        global_order_mass,
+        torch.full((2,), 0.5, dtype=torch.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_v2_partial_archive_uses_native_output_bin_shape():
+    arrays = _partial_arrays(
+        3, 2, 5, "00" * 32, 100, archive_quadrature_reference=True
+    )
+    assert arrays["outcome_bins"].shape == (5,)
+    assert arrays["full_probability"].shape == (3, 5, 100)
+    assert arrays["ablated_probability"].shape == (3, 5, 100)
+    assert arrays["quadrature_grid_full_probability"].shape == (2, 3, 5, 100)
+    assert arrays["quadrature_grid_ablated_probability"].shape == (2, 3, 5, 100)
+    assert arrays["quadrature_max_bin_abs_ordering_value_change"].shape == (3, 5)
 
 
 def test_every_production_calibration_field_is_frozen():
@@ -360,3 +429,63 @@ def test_calibration_writes_raw_oracle_arrays_without_scientific_endpoint(tmp_pa
         assert raw["full_probability_sum_error"].shape == (2, 3, 2)
         assert raw["js_full"].shape == (2, 2, 2)
         assert raw["attempt_identity_sha256"].shape == (2, 32)
+
+
+def test_unregistered_v3_cannot_call_core_runner(tmp_path):
+    config = {
+        "schema_version": 1,
+        "status": "calibration_only",
+        "fleet_module": str(FLEET_PATH),
+        "fleet_sha256": "1aa7652cad924c90f871309f860b9172e836898c5a1620c77fdd3196e70d291d",
+        "dimension": 4,
+        "context_size": 30,
+        "priors": ["C", "N"],
+        "calibration_contexts_per_prior": 1,
+        "calibration_seed_root": 99_600,
+        "calibration_seed_namespace": "test-qualification-v2",
+        "atom_count": 96,
+        "atom_seed": 99_601,
+        "reserved_confirmatory_seeds": [99_700, 99_701],
+        "known_persisted_fixed_seeds": [810_000],
+        "truncation_candidates": [24, 48],
+        "reference_truncation": 96,
+        "quadrature_interior_nodes": 2,
+        "quadrature_tail_nodes": 4,
+        "quadrature_reference_interior_nodes": 4,
+        "quadrature_reference_tail_nodes": 8,
+        "quadrature_qualification": {
+            "js_max": 1e9,
+            "reference_probability_floor": 1e-8,
+            "max_bin_abs_logp_change_max": 1e9,
+            "reference_weighted_abs_logp_change_max": 1e9,
+            "max_bin_abs_ordering_value_change_max": 1e9,
+        },
+        "query_grid_chunk": 8,
+        "context_atom_batch": 32,
+        "require_clean_git": False,
+        "requirements_lock": "environment/requirements-lock.txt",
+        "thresholds": {
+            "median_js_max": 1e9,
+            "p95_js_max": 1e9,
+            "median_abs_logp_change_max": 1e9,
+            "p95_abs_logp_change_max": 1e9,
+            "numerical_indifference_fraction": 0.0,
+            "probability_sum_atol": 1e-8,
+        },
+        "qualification_protocol_version": 3,
+        "archive_predictive_arrays": True,
+        "oracle_internal_dtype": "float64",
+    }
+    config_path = tmp_path / "qualification_v2.json"
+    config_path.write_text(json.dumps(config))
+    output_dir = tmp_path / "out-v3"
+    with pytest.raises(RuntimeError, match="frozen CLI execution path"):
+        run_calibration(
+            config_path,
+            output_dir,
+            "cpu",
+            production_protocol=False,
+            strict_runtime=False,
+            stage_name="phase1_ordering_cross_bank_qualification_v3",
+        )
+    assert not output_dir.exists()
