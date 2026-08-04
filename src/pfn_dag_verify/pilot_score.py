@@ -48,32 +48,66 @@ def _load_config(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
+ROW_KEY_FIELDS = ("row_id", "prior_code", "draw_index", "stream_index", "row_key_sha256")
+
+
 def _panel_rows(panel_dir: Path, config: dict[str, Any]) -> dict[str, np.ndarray]:
-    """Collect the 400 nested-half rows (draw 0, stream<200) from the frozen panel."""
-    prior_code_map = {"C": 0, "N": 1}
+    """Collect the 400 nested-half rows (draw 0, stream<200) from the frozen panel.
+
+    Verifies input-label alignment per shard (the production pipeline hard-fails
+    on misalignment), verifies the shard hashes against the panel manifest, and
+    asserts the exact frozen 400-row identity.
+    """
+    from .pilot_shared import sha256_file
     rows: dict[str, list[np.ndarray]] = {
         "row_id": [], "prior_code": [], "contexts": [], "queries": [], "outcome_bins": []
     }
     half = config["nested_half_subset"]
+    manifest = None
+    manifest_path = panel_dir / "panel_manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text())
     for prior in ("C", "N"):
         for bank in range(3):
             input_path = panel_dir / "inputs" / f"{prior}_d0_b{bank}.npz"
             label_path = panel_dir / "labels" / f"{prior}_d0_b{bank}.npz"
             assert_path_allowed(input_path)
-            with np.load(input_path, allow_pickle=False) as a:
-                mask = (a["draw_index"] == half["draw_index"]) & (
-                    a["stream_index"] < half["stream_index_stop_exclusive"]
+            assert_path_allowed(label_path)
+            # provenance: hash against the frozen panel manifest
+            if manifest is not None:
+                expected = manifest.get("artifacts", {}).get(f"inputs/{input_path.name}")
+                if expected is not None and sha256_file(input_path) != expected["sha256"]:
+                    raise RuntimeError(f"panel input hash mismatch: {input_path.name}")
+                expected_l = manifest.get("artifacts", {}).get(f"labels/{label_path.name}")
+                if expected_l is not None and sha256_file(label_path) != expected_l["sha256"]:
+                    raise RuntimeError(f"panel label hash mismatch: {label_path.name}")
+            with np.load(input_path, allow_pickle=False) as a_in, np.load(label_path, allow_pickle=False) as a_lab:
+                # hard-fail on input/label misalignment, matching phase1_join
+                for k in ROW_KEY_FIELDS:
+                    if not np.array_equal(a_in[k], a_lab[k]):
+                        raise RuntimeError(f"panel input/label misalignment: {k} {input_path.name}")
+                mask = (a_in["draw_index"] == half["draw_index"]) & (
+                    a_in["stream_index"] < half["stream_index_stop_exclusive"]
                 )
-                rows["row_id"].append(a["row_id"][mask])
-                rows["prior_code"].append(a["prior_code"][mask])
-                rows["contexts"].append(a["contexts"][mask])
-                rows["queries"].append(a["queries"][mask])
-            with np.load(label_path, allow_pickle=False) as a:
-                rows["outcome_bins"].append(a["outcome_bins"][mask])
+                # the mask must equal the panel's stored nested_half_mask
+                if not np.array_equal(mask, a_in["nested_half_mask"] == 1):
+                    raise RuntimeError(f"nested-half mask mismatch: {input_path.name}")
+                rows["row_id"].append(a_in["row_id"][mask])
+                rows["prior_code"].append(a_in["prior_code"][mask])
+                rows["contexts"].append(a_in["contexts"][mask])
+                rows["queries"].append(a_in["queries"][mask])
+                rows["outcome_bins"].append(a_lab["outcome_bins"][mask])
     out = {k: np.concatenate(v) for k, v in rows.items()}
     # order deterministically by (prior_code, row_id)
     order = np.lexsort((out["row_id"], out["prior_code"]))
-    return {k: v[order] for k, v in out.items()}
+    out = {k: v[order] for k, v in out.items()}
+    # exact frozen 400-row identity: C rows 0..199, N rows 3201..3400
+    if len(out["row_id"]) != 400:
+        raise RuntimeError(f"pilot panel must be exactly 400 rows, got {len(out['row_id'])}")
+    expected_ids = np.concatenate([np.arange(0, 200), np.arange(3201, 3401)])
+    if not np.array_equal(np.sort(out["row_id"]), expected_ids):
+        raise RuntimeError("pilot panel row identity is not the frozen nested-half set")
+    return out
 
 
 def _smc_row(
@@ -95,8 +129,15 @@ def _smc_row(
         for o in range(N_ORDERINGS)
     }
     full, ablated, w_o = smc_full_ablated(context, query, prior, smc, device)
-    nll_full = -np.log(max(full[outcome_bin], 1e-300))
-    nll_ablated = -np.log(max(ablated[outcome_bin], 1e-300))
+    for p in (full, ablated):
+        if not (np.isfinite(p).all() and (p >= 0).all() and abs(p.sum() - 1.0) < 1e-8):
+            raise RuntimeError("smc predictive is not a valid probability vector")
+    if full[outcome_bin] <= 0.0 or not np.isfinite(full[outcome_bin]):
+        raise RuntimeError(f"smc full predictive has zero observed-bin mass: bin {outcome_bin}")
+    if ablated[outcome_bin] <= 0.0 or not np.isfinite(ablated[outcome_bin]):
+        raise RuntimeError(f"smc ablated predictive has zero observed-bin mass: bin {outcome_bin}")
+    nll_full = -np.log(full[outcome_bin])
+    nll_ablated = -np.log(ablated[outcome_bin])
     return {
         "full_probability": full,
         "ablated_probability": ablated,
@@ -153,6 +194,11 @@ def score_pilot(
 ) -> dict[str, Any]:
     assert_no_forbidden_imports()
     config = _load_config(config_path)
+    from .pilot_shared import FORBIDDEN_SEED_NAMESPACES
+    seed_root = int(config["seed_root"])
+    for ns in FORBIDDEN_SEED_NAMESPACES:
+        if ns <= seed_root < ns + 10_000_000:
+            raise RuntimeError(f"pilot seed root {seed_root} collides with a forbidden namespace {ns}")
     device = torch.device(device_name)
     rows = _panel_rows(panel_dir, config)
     n = len(rows["row_id"])
@@ -196,13 +242,18 @@ def score_pilot(
         full /= np.sum(np.exp(mcmc_logz - max(mcmc_logz)))
         ablated = sum(mcmc_predictives[o] for o in range(N_ORDERINGS)) / N_ORDERINGS
         w_o = np.exp(mcmc_logz - max(mcmc_logz)); w_o /= w_o.sum()
+        for p in (full, ablated, w_o):
+            if not (np.isfinite(p).all() and (p >= 0).all() and abs(p.sum() - 1.0) < 1e-6):
+                raise RuntimeError("mcmc predictive/order posterior is not a valid probability vector")
+        if full[ob] <= 0.0 or ablated[ob] <= 0.0:
+            raise RuntimeError(f"mcmc predictive has zero observed-bin mass: bin {ob}")
         results["smc"].append(smc_row)
         results["mcmc"].append({
             "full_probability": full,
             "ablated_probability": ablated,
             "ordering_posterior": w_o,
-            "nll_full": float(-np.log(max(full[ob], 1e-300))),
-            "nll_ablated": float(-np.log(max(ablated[ob], 1e-300))),
+            "nll_full": float(-np.log(full[ob])),
+            "nll_ablated": float(-np.log(ablated[ob])),
             "logZ": mcmc_logz,
         })
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -216,9 +267,17 @@ def score_pilot(
              smc_full_nll=np.array([r["nll_full"] for r in results["smc"]]),
              smc_ablated_nll=np.array([r["nll_ablated"] for r in results["smc"]]),
              smc_order_posterior=np.array([r["ordering_posterior"] for r in results["smc"]]),
+             smc_full_probability=np.array([r["full_probability"] for r in results["smc"]]),
+             smc_ablated_probability=np.array([r["ablated_probability"] for r in results["smc"]]),
+             smc_logZ=np.array([[r["logZ"][o] for o in range(N_ORDERINGS)] for r in results["smc"]]),
+             smc_ess=np.array([[r["ess"][o] for o in range(N_ORDERINGS)] for r in results["smc"]]),
+             smc_accept=np.array([[r["accept"][o] for o in range(N_ORDERINGS)] for r in results["smc"]]),
              mcmc_full_nll=np.array([r["nll_full"] for r in results["mcmc"]]),
              mcmc_ablated_nll=np.array([r["nll_ablated"] for r in results["mcmc"]]),
              mcmc_order_posterior=np.array([r["ordering_posterior"] for r in results["mcmc"]]),
+             mcmc_full_probability=np.array([r["full_probability"] for r in results["mcmc"]]),
+             mcmc_ablated_probability=np.array([r["ablated_probability"] for r in results["mcmc"]]),
+             mcmc_logZ=np.array([r["logZ"] for r in results["mcmc"]]),
              )
     return summary
 

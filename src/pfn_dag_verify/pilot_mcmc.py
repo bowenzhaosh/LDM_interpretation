@@ -283,16 +283,25 @@ def mcmc_evidence_ti(
     """Thermodynamic integration estimate of log Z_o(D).
 
     log Z = int_0^1 E_{pi_beta}[log L] d beta, trapezoidal over the beta ladder.
+    The beta=0 chain MUST be initialized from the exact prior (the integrand is
+    steepest there and the posterior mode is not in the prior bulk).
     """
+    from .pilot_shared import sample_prior_z
+    betas = np.asarray(betas, dtype=np.float64)
+    if len(betas) < 2 or betas[0] > 1e-3 or abs(betas[-1] - 1.0) > 1e-12:
+        raise RuntimeError("TI beta ladder must span [0,1] with a fine low-beta end")
+    if len(np.unique(np.round(betas * 1e6))) != len(betas):
+        raise RuntimeError("TI beta ladder has duplicate/too-close betas")
     ctx = torch.as_tensor(context, dtype=torch.float64, device=device)
-    z_mode, sg_mode = find_mode(context, ordering, prior, n_starts=24, seed=seed + 7)
-    z0 = torch.as_tensor(z_mode, dtype=torch.float64, device=device)
-    sg0 = torch.as_tensor(sg_mode, dtype=torch.float64, device=device)
+    # beta=0 chain from the exact prior
+    zp, sgp = sample_prior_z((), min(n_chains, 128), np.random.default_rng(seed + 1000))
+    z_cur = torch.as_tensor(zp, dtype=torch.float64, device=device)
+    sg_cur = torch.as_tensor(sgp, dtype=torch.float64, device=device)
     means: list[float] = []
-    z_cur = z0
-    sg_cur = sg0
-    for b in betas:
-        z, sg, ll, _ = _mcmc_chain(context, ordering, prior, z_cur, sg_cur, float(b), n_iter_per_beta, n_chains, seed + int(b * 1000), device)
+    for bi, b in enumerate(betas):
+        z, sg, ll, _ = _mcmc_chain(
+            context, ordering, prior, z_cur, sg_cur, float(b),
+            n_iter_per_beta, n_chains, seed + bi, device)
         fin = torch.isfinite(ll)
         if fin.sum() < 10:
             raise RuntimeError("MCMC-TI chain has too few valid samples")
@@ -301,7 +310,6 @@ def mcmc_evidence_ti(
         finidx = torch.nonzero(fin).flatten()
         z_cur = z[finidx[-1]]
         sg_cur = sg[finidx[-1]]
-    betas = np.asarray(betas, dtype=np.float64)
     m = np.asarray(means)
     # trapezoid: logZ = sum_i (b_{i+1}-b_i) * (m_i + m_{i+1})/2
     return float(np.sum(np.diff(betas) * (m[:-1] + m[1:]) / 2.0))

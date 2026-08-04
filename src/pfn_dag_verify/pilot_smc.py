@@ -174,8 +174,13 @@ def run_smc_posterior(
     n_finite = torch.isfinite(ll).sum().item()
     if n_finite < n * 0.5:
         raise RuntimeError(f"SMC prior initialization failed: only {n_finite}/{n} valid particles")
+    prior_mean_ll = float(torch.mean(ll[torch.isfinite(ll)]).item())
     while beta < 1.0 - 1e-12:
-        # --- adaptive temperature by conditional ESS ---
+        # --- adaptive temperature by weighted conditional ESS ---
+        # The current (possibly non-uniform) particle weights enter the
+        # conditional-ESS criterion; an unweighted criterion over-estimates it.
+        w_cur = torch.exp(logw - logw.max())
+        w_cur = w_cur / w_cur.sum()
         lo, hi = beta, 1.0
         beta_new = None
         for _ in range(24):
@@ -185,9 +190,10 @@ def run_smc_posterior(
                 beta_new = mid
                 break
             m = torch.max(d * ll)
-            inc = torch.exp(d * ll - m)
-            inc = inc / inc.sum()
-            cess = 1.0 / torch.sum(inc * inc)
+            inc = w_cur * torch.exp(d * ll - m)
+            num = inc.sum()
+            den = (w_cur * torch.exp(2.0 * d * ll - 2.0 * m)).sum()
+            cess = n * num * num / den if den > 0 else 0.0
             if cess.item() >= cess_target * n:
                 lo = mid
             else:
@@ -201,14 +207,16 @@ def run_smc_posterior(
         # where w_i are the current (possibly non-uniform) particle weights.
         log_inc = logw + dbeta * ll
         m2 = torch.max(log_inc)
-        logZ += (m2 + torch.log(torch.sum(torch.exp(log_inc - m2))) - torch.logsumexp(logw, dim=0)).item()
+        logw_old_sum = torch.logsumexp(logw, dim=0)
+        inc_val = (m2 + torch.log(torch.sum(torch.exp(log_inc - m2))) - logw_old_sum).item()
+        logZ += inc_val
+        inc_log_normalizers.append(inc_val)
         logw = logw + dbeta * ll
         w = torch.exp(logw - logw.max())
         w = w / w.sum()
         ess = 1.0 / torch.sum(w * w)
         ess_history.append(ess.item())
         posterior_mean_ll_history.append(float(torch.sum(w * ll).item()))
-        inc_log_normalizers.append(m2.item() + math.log(torch.sum(torch.exp(log_inc - m2)).item()) - torch.logsumexp(logw, dim=0).item())
         # --- resampling ---
         if ess.item() < resample_frac * n:
             idx = _systematic_resample(logw, g)
@@ -234,13 +242,13 @@ def run_smc_posterior(
         for _ in range(mh_steps):
             eps = torch.randn(n, N_CONT, dtype=torch.float64, device=device, generator=g)
             z_prop = z + step * (eps @ Lc.T)
-            flip = torch.rand(n, N_SIGN, device=device, generator=g) < sign_flip_prob
+            flip = torch.rand(n, N_SIGN, device=device, generator=g, dtype=torch.float64) < sign_flip_prob
             sign_prop = torch.where(flip, -sign, sign)
             lp_p = log_prior_density_z_torch(z_prop, sign_prop)
             ll_p = log_likelihood_batch(z_prop, sign_prop, ctx, ordering, prior)
             target_p = lp_p + beta * ll_p
             a = torch.exp(torch.clamp(target_p - target_logp, max=0.0))
-            u = torch.rand(n, device=device, generator=g)
+            u = torch.rand(n, device=device, generator=g, dtype=torch.float64)
             acc = u < a
             z = torch.where(acc[:, None], z_prop, z)
             sign = torch.where(acc[:, None], sign_prop, sign)
@@ -275,6 +283,7 @@ def run_smc_posterior(
         "ess_history": ess_history,
         "accept_history": accept_history,
         "posterior_mean_ll_history": posterior_mean_ll_history,
+        "prior_mean_ll": prior_mean_ll,
         "unique_particles": int(uniq),
     }
 
@@ -292,10 +301,12 @@ def thermodynamic_integration(smc: dict[str, Any]) -> float:
     if len(betas) < 2 or len(means) != len(betas) - 1:
         raise RuntimeError("SMC history is incomplete for thermodynamic integration")
     # means[t] is the posterior mean of ll at beta = betas[t+1]
-    # (recorded after reaching beta_{t+1}). Use midpoint pairing.
+    # (recorded after reaching beta_{t+1}). The beta=0 endpoint is E_prior[ll];
+    # use it for the first interval instead of substituting means[0].
+    e0 = float(smc.get("prior_mean_ll", np.nan))
     db = np.diff(betas)
     lo = means
-    hi = np.concatenate([[means[0]], means])
+    hi = np.concatenate([[e0], means])
     return float(np.sum(db * (lo + hi[:len(db)]) / 2.0))
 
 
@@ -329,6 +340,11 @@ def order_predictive(
     z = torch.as_tensor(smc["z"], dtype=torch.float64, device=device)
     sign = torch.as_tensor(smc["sign"], dtype=torch.float64, device=device)
     w = torch.as_tensor(smc["weights"], dtype=torch.float64, device=device)
+    # keep only finite-weight (valid) particles
+    keep = (w > 0) & torch.isfinite(w)
+    if not keep.any():
+        raise RuntimeError("SMC predictive has no valid particles")
+    z, sign, w = z[keep], sign[keep], w[keep]
     sd, rho_mag = z_to_native_torch(z)
     S = make_sigma_torch(sd, rho_mag, sign)
     perm = fleet().ORDERINGS[ordering]
