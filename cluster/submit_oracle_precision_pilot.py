@@ -46,7 +46,7 @@ def main() -> int:
     parser.add_argument("--n-shards", type=int, default=N_SHARDS)
     parser.add_argument("--rows", type=int, default=N_ROWS)
     parser.add_argument("--partition", default=CONDO)
-    parser.add_argument("--time", default="12:00:00")
+    parser.add_argument("--time", default="24:00:00")
     parser.add_argument("--validate-only", action="store_true",
                         help="sync and run a 1-row smoke, then stop")
     args = parser.parse_args()
