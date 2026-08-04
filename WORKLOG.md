@@ -122,3 +122,15 @@ Verified results (with the fixes above, synthetic context, ordering 0 and 19):
 - When the shards complete: `pilot_verify.join_shards` then `pilot_verify.verify`
   then `pilot_report.render`. Expected verdict FAILED_ORACLE_METHOD_AGREEMENT
   -> Branch B.
+
+## 2026-08-05 — Pilot re-launch after aggregation bug
+
+- The first-wave shards crashed ~1h in on a list-vs-array bug in the pilot
+  scorer's MCMC aggregation: `mcmc_logz` was a list, so `mcmc_logz - max(...)`
+  raised TypeError. Fixed by `mcmc_logz = np.asarray(mcmc_logz)` before the
+  full/ablated/order-posterior combination. Verified locally (aggregation
+  normalizes to 1) and on the cluster (line 241 has the fix).
+- Cancelled the crashed shards, cleaned the remote run dir, re-synced (the
+  launcher now excludes `run/`), and re-submitted all 40 shards (jobs recorded
+  in SUBMISSION.json: 40).
+- Pilot running again; hourly cron monitors completion.
