@@ -65,3 +65,27 @@ Verified results (with the fixes above, synthetic context, ordering 0 and 19):
   -> Branch B (exact finite-prior wind tunnel), per the design doc.
 - Proceed to Phase 2 fixtures to validate the SMC thoroughly and characterize
   the AIS before freezing.
+
+## 2026-08-04 — Cluster validation debugging (IN PROGRESS)
+
+- Built the pilot scorer (`pilot_score.py`, sharded), the cluster launcher
+  (`cluster/submit_oracle_precision_pilot.py`, rsync + Slurm), and the
+  independent raw-array verifier (`pilot_verify.py` with shard join).
+- Cluster issues found and fixed:
+  1. `-I -S` interpreter flags broke PYTHONPATH/site-packages; removed.
+  2. Seed-namespace guard was too aggressive (a broad 880M entry swallowed the
+     pilot 886M root); made the forbidden seeds precise with a 1e6 window.
+  3. Manual `CUDA_VISIBLE_DEVICES` override corrupts the GPU allocation;
+     removed (Slurm's gres plugin sets it).
+- The three adversarial audits (SMC, MCMC-TI, outcome-blindness) were applied;
+  dispositions in ORACLE_PRECISION_PILOT_AUDIT.md. Key fixes: weighted-CESS
+  schedule, incremental-logZ recording order, prior-init beta=0 TI, input-label
+  row alignment + provenance checks, hard NLL floor checks, diagnostics
+  persistence.
+- Validation job 160413 running (1 row, full config).
+
+## Next
+- Confirm validation passes; launch the 40-shard pilot.
+- Join + verify + report; record the scientific verdict (expectation:
+  FAILED_ORACLE_METHOD_AGREEMENT given the evidence-precision bottleneck,
+  routing to Branch B).
