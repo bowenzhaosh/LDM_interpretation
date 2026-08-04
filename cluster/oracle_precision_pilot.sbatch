@@ -34,7 +34,6 @@ PY="/engrfs/project/class/zhao.b/conda_envs/tidpo/bin/python"
 export PYTHONPATH="${SRC}/src"
 export OMP_NUM_THREADS=8
 export OPENBLAS_NUM_THREADS=8
-export CUDA_VISIBLE_DEVICES="${SLURM_JOB_GPUS:-0}"
 
 PANEL="${SRC}/campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix2_run1/panel"
 CONFIG="${SRC}/config/oracle_precision_pilot_v1.json"
