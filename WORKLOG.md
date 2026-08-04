@@ -110,3 +110,15 @@ Verified results (with the fixes above, synthetic context, ordering 0 and 19):
 - Record the scientific verdict; proceed to Branch B (exact finite-prior
   causal wind tunnel): design the exact finite library, train PFNs on it, and
   measure predictive capture vs graph-posterior fidelity.
+
+## 2026-08-04 — Full pilot launched (40 shards)
+
+- All 40 shards submitted and running on condo-cse5100 (SUBMISSION.json on the
+  cluster records all job IDs). Expected wall time ~40 h at the reduced config.
+- Caveat found and fixed: the launcher's rsync `--delete` wiped the remote
+  `run/` directory (the local repo does not contain it), which aborted the
+  in-progress 1-row validation job mid-write (job 160561). Fixed by excluding
+  `run/` from the rsync. Do NOT re-sync while the pilot is running.
+- When the shards complete: `pilot_verify.join_shards` then `pilot_verify.verify`
+  then `pilot_report.render`. Expected verdict FAILED_ORACLE_METHOD_AGREEMENT
+  -> Branch B.

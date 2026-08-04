@@ -35,6 +35,7 @@ def _rsync(local: Path, remote: str) -> None:
         "rsync", "-az", "--delete", "--exclude=.git", "--exclude=.pytest_cache",
         "--exclude=.ruff_cache", "--exclude=artifacts/checkpoints",
         "--exclude=campaigns/**/checkpoints",
+        "--exclude=run",  # never wipe a live run's outputs on re-sync
         str(local) + "/", f"{CLUSTER}:{remote}/",
     ]
     subprocess.run(cmd, check=True)
