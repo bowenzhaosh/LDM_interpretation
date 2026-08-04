@@ -20,7 +20,7 @@ CLUSTER = "washu"
 REMOTE_ROOT = "/engrfs/project/class/zhao.b/pfn-dag-oracle-precision-pilot-v1"
 CONDO = "condo-cse5100"
 ACCOUNT = "engr-acad-cse5100"
-N_SHARDS = 10
+N_SHARDS = 40
 N_ROWS = 400
 SBATCH = "cluster/oracle_precision_pilot.sbatch"
 
