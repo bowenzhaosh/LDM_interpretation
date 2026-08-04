@@ -56,19 +56,17 @@ NEGLOG_P_VALID = 2.57242
 
 # Reserved seed namespaces. All frozen production seeds and this pilot's
 # development seeds are disjoint; the panel never shares a namespace with
-# calibration.
+# calibration. The forbidden seeds are the specific frozen values; the pilot
+# seed roots (886/887 million) are in a distinct block. A pilot root within
+# 1,000,000 of any forbidden seed is rejected.
 PILOT_DEV_SEED_ROOT = 886_000_000
 FORBIDDEN_SEED_NAMESPACES = (
-    # calibration / qualification / confirmation are forbidden for pilot dev
-    880_000_000,
-    880_800_000,
-    880_900_000,
-    880_920_000,
-    880_940_000,
-    881_000_000,
-    881_010_000,
-    881_100_000,
+    880_803_000,  # calibration seed root
+    880_903_000, 880_923_000, 880_943_000, 880_953_000,  # qualification v1-v3
+    881_003_000, 881_013_000,  # confirmation evaluation
+    881_003_101, 881_003_102, 881_003_103,  # atom banks
     881_003_900,  # bootstrap master
+    881_103_999,  # atom determinism canary
 )
 
 # Paths and import names that pilot code must never touch (outcome blindness).

@@ -197,8 +197,8 @@ def score_pilot(
     from .pilot_shared import FORBIDDEN_SEED_NAMESPACES
     seed_root = int(config["seed_root"])
     for ns in FORBIDDEN_SEED_NAMESPACES:
-        if ns <= seed_root < ns + 10_000_000:
-            raise RuntimeError(f"pilot seed root {seed_root} collides with a forbidden namespace {ns}")
+        if abs(seed_root - int(ns)) < 1_000_000:
+            raise RuntimeError(f"pilot seed root {seed_root} is within 1e6 of a forbidden seed {ns}")
     device = torch.device(device_name)
     rows = _panel_rows(panel_dir, config)
     n = len(rows["row_id"])
