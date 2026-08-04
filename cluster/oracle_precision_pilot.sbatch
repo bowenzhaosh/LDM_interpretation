@@ -40,7 +40,7 @@ PANEL="${SRC}/campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix2_r
 CONFIG="${SRC}/config/oracle_precision_pilot_v1.json"
 
 cd "$SRC"
-"$PY" -I -S -m pfn_dag_verify.pilot_score \
+"$PY" -m pfn_dag_verify.pilot_score \
   --config "$CONFIG" \
   --panel "$PANEL" \
   --out "$SHARD_DIR" \
