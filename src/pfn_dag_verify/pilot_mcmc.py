@@ -179,8 +179,21 @@ def _mcmc_chain(
     g = torch.Generator(device=device)
     g.manual_seed(int(rng.integers(0, 2**63)))
     ctx = torch.as_tensor(context, dtype=torch.float64, device=device)
-    z = z0.clone().expand(n_chains, -1).clone()
-    sg = sg0.clone().expand(n_chains, -1).clone()
+    # Accept a single start (expand) or a batch of starts (use directly or cycle).
+    if z0.dim() == 1:
+        z0 = z0.unsqueeze(0)
+        sg0 = sg0.unsqueeze(0)
+    n0 = z0.shape[0]
+    if n0 == 1:
+        z = z0.expand(n_chains, -1).clone()
+        sg = sg0.expand(n_chains, -1).clone()
+    elif n0 >= n_chains:
+        z = z0[:n_chains].clone()
+        sg = sg0[:n_chains].clone()
+    else:
+        idx = torch.arange(n_chains, device=device) % n0
+        z = z0[idx].clone()
+        sg = sg0[idx].clone()
     ll = likelihood_batch(z, sg, ctx, ordering, prior)
     lp = log_prior_density_z_torch(z, sg)
     target = lp + beta * ll
@@ -294,7 +307,7 @@ def mcmc_evidence_ti(
         raise RuntimeError("TI beta ladder has duplicate/too-close betas")
     ctx = torch.as_tensor(context, dtype=torch.float64, device=device)
     # beta=0 chain from the exact prior
-    zp, sgp = sample_prior_z((), min(n_chains, 128), np.random.default_rng(seed + 1000))
+    zp, sgp = sample_prior_z((), n_chains, np.random.default_rng(seed + 1000))
     z_cur = torch.as_tensor(zp, dtype=torch.float64, device=device)
     sg_cur = torch.as_tensor(sgp, dtype=torch.float64, device=device)
     means: list[float] = []

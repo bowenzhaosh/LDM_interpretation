@@ -165,7 +165,7 @@ def _mcmc_row_ordering(
     betas = np.asarray(config["mcmc"]["betas"], dtype=np.float64)
     n_per_beta = int(config["mcmc"]["n_iter_per_beta"])
     # evidence via TI, beta=0 chain from the prior
-    zp, sgp = sample_prior_z((), min(nc, 128), np.random.default_rng(seed + 1000))
+    zp, sgp = sample_prior_z((), nc, np.random.default_rng(seed + 1000))
     z_cur = torch.as_tensor(zp, dtype=torch.float64, device=device)
     sg_cur = torch.as_tensor(sgp, dtype=torch.float64, device=device)
     means: list[float] = []
