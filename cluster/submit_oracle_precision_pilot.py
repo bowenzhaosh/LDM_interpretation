@@ -19,6 +19,7 @@ import os
 CLUSTER = "washu"
 REMOTE_ROOT = "/engrfs/project/class/zhao.b/pfn-dag-oracle-precision-pilot-v1"
 CONDO = "condo-cse5100"
+ACCOUNT = "engr-acad-cse5100"
 N_SHARDS = 10
 N_ROWS = 400
 SBATCH = "cluster/oracle_precision_pilot.sbatch"
@@ -53,7 +54,7 @@ def main() -> int:
     _rsync(repo, REMOTE_ROOT)
     print(f"synced repo to {CLUSTER}:{REMOTE_ROOT}", flush=True)
     if args.validate_only:
-        cmd = (f"sbatch --partition={args.partition} --gres=gpu:1 --cpus-per-task=8 "
+        cmd = (f"sbatch --partition={args.partition} --account={ACCOUNT} --gres=gpu:1 --cpus-per-task=8 "
                f"--mem=48G --time={args.time} --parsable {REMOTE_ROOT}/{SBATCH} "
                f"--source-root {REMOTE_ROOT} --out-root {REMOTE_ROOT}/run --row-start 0 --row-count 1")
         out = _ssh(cmd)
@@ -65,7 +66,7 @@ def main() -> int:
     for s in range(args.n_shards):
         rs = s * rows_per
         rc = rows_per if s < args.n_shards - 1 else args.rows - rs
-        cmd = (f"sbatch --partition={args.partition} --gres=gpu:1 --cpus-per-task=8 "
+        cmd = (f"sbatch --partition={args.partition} --account={ACCOUNT} --gres=gpu:1 --cpus-per-task=8 "
                f"--mem=48G --time={args.time} --parsable {REMOTE_ROOT}/{SBATCH} "
                f"--source-root {REMOTE_ROOT} --out-root {REMOTE_ROOT}/run "
                f"--row-start {rs} --row-count {rc}")
