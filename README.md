@@ -28,8 +28,13 @@ It does not test whether a Transformer implements Bayes, whether attention is th
   tolerance. Its raw label-free diagnostics and failure record are archived
   under
   `campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix1_attempt2_failed/`.
-  No result is claimed until FIX2 passes pre-run audit, a fresh attempt
-  completes, and its raw archive passes post-run audit.
+  FIX2 then completed all seven jobs and passed independent raw replay, but its
+  preregistered oracle-convergence gate failed. Its decision is
+  `INCONCLUSIVE_PHASE1_INSTRUMENT`, so it establishes neither PFN ordering use
+  nor an undertraining effect. The complete raw campaign, portable checkpoints,
+  adversarial audit, claim ledger, and HTML report are archived at
+  [`campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix2_run1/`](campaigns/phase1_ordering_20260803/ordering_confirmation_v1_fix2_run1/)
+  and tagged `phase1-ordering-confirmation-v1-fix2-results`.
 
 ## Scientific design
 
@@ -120,4 +125,10 @@ Scoring first writes `pre_score_guard.json`, which records all full-fleet produc
 
 ## Result status
 
-The version-2 stream at commit `d0b049d` stopped at its pre-score batch guard and produced no prediction shard or scientific verdict. Version 3 requires a new commit-derived stream. The final scientific claim ledger and raw replay bundle are added only after that one-shot run completes. External publication or a GitHub push is not performed automatically.
+The Phase-2 induced-coordinate stream remains blocked by its failed mapping
+qualification. The separate Phase-1 FIX2 confirmation executed completely but
+returned an instrument-inconclusive verdict because the prior-proposal oracle
+did not converge. Its public result archive is commit `bcccc95` and annotated
+tag `phase1-ordering-confirmation-v1-fix2-results`. The next allowed run is an
+outcome-blind oracle-precision pilot; another scientific confirmation is
+prohibited until that instrument passes prospectively frozen numerical gates.
