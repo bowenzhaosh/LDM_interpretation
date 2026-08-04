@@ -89,3 +89,24 @@ Verified results (with the fixes above, synthetic context, ordering 0 and 19):
 - Join + verify + report; record the scientific verdict (expectation:
   FAILED_ORACLE_METHOD_AGREEMENT given the evidence-precision bottleneck,
   routing to Branch B).
+
+## 2026-08-04 — Cluster validation + full pilot launch (compute constraint)
+
+- Cluster validation at the reduced config measured ~1 h per frozen row
+  (bottleneck: the validity check runs 24 orderings of Cholesky per particle
+  per likelihood evaluation; the MCMC-TI and SMC both call it).
+- Full 400-row pilot at the frozen precision therefore needs ~40 h wall
+  (~400 GPU-hours) on the owned condo-cse5100 partition — a genuine compute
+  constraint, reported per the prompt.
+- The 40-shard pilot was launched and persists on the cluster at
+  /engrfs/project/class/zhao.b/pfn-dag-oracle-precision-pilot-v1/run
+  (SUBMISSION.json records all job IDs).
+- STATUS.md updated with the current state and the expected verdict
+  (FAILED_ORACLE_METHOD_AGREEMENT -> Branch B).
+
+## Next (when the pilot shards complete)
+- Join the shards (pilot_verify.join_shards), run the independent verifier
+  (pilot_verify.verify), generate the HTML report (pilot_report.render).
+- Record the scientific verdict; proceed to Branch B (exact finite-prior
+  causal wind tunnel): design the exact finite library, train PFNs on it, and
+  measure predictive capture vs graph-posterior fidelity.
