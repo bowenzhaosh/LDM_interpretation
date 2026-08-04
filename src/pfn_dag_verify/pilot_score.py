@@ -143,17 +143,31 @@ def _mcmc_row_ordering(
     return {"logZ": logz, "ti_means": m}
 
 
-def score_pilot(config_path: Path, panel_dir: Path, out_dir: Path, device_name: str = "cuda") -> dict[str, Any]:
+def score_pilot(
+    config_path: Path,
+    panel_dir: Path,
+    out_dir: Path,
+    device_name: str = "cuda",
+    row_start: int = 0,
+    row_count: int | None = None,
+) -> dict[str, Any]:
     assert_no_forbidden_imports()
     config = _load_config(config_path)
     device = torch.device(device_name)
     rows = _panel_rows(panel_dir, config)
     n = len(rows["row_id"])
+    if row_count is None:
+        row_count = n - row_start
+    selected = slice(row_start, min(row_start + row_count, n))
     results = {
-        "smc": [], "mcmc": [], "row_keys": rows["row_id"], "prior_code": rows["prior_code"],
+        "smc": [], "mcmc": [], "row_keys": rows["row_id"][selected],
+        "prior_code": rows["prior_code"][selected],
     }
-    seed_root = int(config["seed_root"])
-    for i in range(n):
+    seed_root = int(config["seed_root"]) + row_start
+    for i in range(row_start, row_start + row_count):
+        if i >= n:
+            break
+        li = i - row_start
         prior = "C" if rows["prior_code"][i] == 0 else "N"
         context = rows["contexts"][i]
         query = rows["queries"][i]
@@ -192,10 +206,13 @@ def score_pilot(config_path: Path, panel_dir: Path, out_dir: Path, device_name: 
             "logZ": mcmc_logz,
         })
     out_dir.mkdir(parents=True, exist_ok=True)
-    summary = {"config_path": str(config_path), "n_rows": n, "seed_root": seed_root}
+    summary = {
+        "config_path": str(config_path), "n_rows": n, "seed_root": seed_root,
+        "row_start": row_start, "row_count": row_count,
+    }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     np.savez(out_dir / "smc_raw.npz",
-             row_id=rows["row_id"], prior_code=rows["prior_code"],
+             row_id=results["row_keys"], prior_code=results["prior_code"],
              smc_full_nll=np.array([r["nll_full"] for r in results["smc"]]),
              smc_ablated_nll=np.array([r["nll_ablated"] for r in results["smc"]]),
              smc_order_posterior=np.array([r["ordering_posterior"] for r in results["smc"]]),
@@ -212,8 +229,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--panel", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--row-start", type=int, default=0)
+    parser.add_argument("--row-count", type=int, default=None)
     args = parser.parse_args(argv)
-    result = score_pilot(args.config, args.panel, args.out, args.device)
+    result = score_pilot(args.config, args.panel, args.out, args.device,
+                         args.row_start, args.row_count)
     print(json.dumps(result, indent=2))
     return 0
 
