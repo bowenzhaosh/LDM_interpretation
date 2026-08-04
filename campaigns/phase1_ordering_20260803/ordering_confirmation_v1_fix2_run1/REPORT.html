@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PFN-DAG Phase-1 Confirmation, FIX2 Run 1</title>
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    body { max-width: 1040px; margin: 0 auto; padding: 32px 22px 64px; line-height: 1.55; }
+    h1, h2 { line-height: 1.2; }
+    .status { border-left: 6px solid #c27803; padding: 12px 16px; background: color-mix(in srgb, #c27803 12%, transparent); }
+    .ok { color: #16803b; }
+    .bad { color: #b42318; }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0 28px; }
+    th, td { padding: 9px 10px; border: 1px solid #8886; text-align: left; vertical-align: top; }
+    th { background: #8882; }
+    code { background: #8882; padding: 0.1em 0.3em; border-radius: 4px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    .small { font-size: 0.9rem; color: #777; }
+  </style>
+</head>
+<body>
+  <h1>PFN-DAG Phase-1 ordering confirmation</h1>
+  <p class="small">FIX2 run 1, completed 3 August 2026</p>
+
+  <section class="status">
+    <strong>Scientific decision: INCONCLUSIVE_PHASE1_INSTRUMENT.</strong>
+    The campaign executed successfully and its raw recomputation passed, but
+    the preregistered oracle-convergence gate failed. This run therefore
+    verifies neither PFN ordering use nor an undertraining effect.
+  </section>
+
+  <h2>Execution and integrity</h2>
+  <table>
+    <tr><th>Check</th><th>Result</th></tr>
+    <tr><td>Seven Slurm stages</td><td class="ok">All completed, exit code 0</td></tr>
+    <tr><td>Independent raw recomputation</td><td class="ok"><code>INDEPENDENT_CONFIRMATION_RAW_RECOMPUTATION_PASS</code></td></tr>
+    <tr><td>PFN replay guard</td><td class="ok">18 checkpoints, 3,201 panel rows per checkpoint, 57,618 checkpoint-row evaluations plus 72 stress rows, all tolerances pass</td></tr>
+    <tr><td>Oracle convergence</td><td class="bad">Failed</td></tr>
+    <tr><td>Checkpoint portability</td><td class="ok">18 states plus 6 sidecars packaged and hash-verified</td></tr>
+    <tr><td>Remote-to-local transfer</td><td class="ok">8,021 files and 162,056,062 bytes matched by canonical tree SHA-256 before local packaging</td></tr>
+  </table>
+
+  <h2>Registered endpoints</h2>
+  <table>
+    <tr><th>Quantity</th><th>Point</th><th>95% interval or bound</th><th>Interpretation</th></tr>
+    <tr><td>Ordering value under C</td><td>0.075718</td><td>one-sided lower 0.064180</td><td class="ok">Manipulation check passes</td></tr>
+    <tr><td>Ordering value under N</td><td>approximately 0</td><td>approximately +/- 6.6e-17</td><td class="ok">Exact null passes</td></tr>
+    <tr><td>Direct C deficit at 120k</td><td>-0.010804</td><td>[-0.022328, 0.000724]</td><td class="bad">Mandatory direct rule fails</td></tr>
+    <tr><td>C-minus-N deficit at 120k</td><td>-0.025802</td><td>[-0.038691, -0.012884]</td><td>Favorable descriptively, insufficient alone</td></tr>
+    <tr><td>C deficit change, 20k to 120k</td><td>-0.053481</td><td>[-0.062507, -0.044469]</td><td>Descriptive improvement only</td></tr>
+    <tr><td>C-minus-N change, 20k to 120k</td><td>-0.027845</td><td>[-0.038323, -0.017251]</td><td>Descriptive improvement only</td></tr>
+  </table>
+
+  <h2>Why the instrument failed</h2>
+  <table>
+    <tr><th>Nested oracle comparison</th><th>Point</th><th>95% interval</th></tr>
+    <tr><td>C full, 3M minus 1.5M</td><td>-0.015597</td><td>[-0.032741, -0.000473]</td></tr>
+    <tr><td>C ablated, 3M minus 1.5M</td><td>-0.002751</td><td>[-0.010216, 0.004608]</td></tr>
+    <tr><td>N full and ablated</td><td>-0.001127</td><td>[-0.005911, 0.003372]</td></tr>
+    <tr><td>C-minus-N ablated</td><td>-0.001623</td><td>[-0.010404, 0.007167]</td></tr>
+  </table>
+  <p>
+    The frozen gate required these oracle changes to remain within
+    <code>+/-0.0005</code>. Under C, the prior-proposal importance sampler has
+    median full-oracle ESS 16.38 from three million atoms, minimum 1.01, and
+    34.05% of rows below ESS 10. Lower ESS is associated with larger
+    full-minus-half error. Row alignment, raw joins, model replay, and the
+    independent verifier all passed. The strongest current diagnosis is
+    proposal degeneracy in the causal oracle.
+  </p>
+
+  <h2>What may be said</h2>
+  <p>
+    On the frozen d=4/base fleet and reused panel, the ordering-value
+    manipulation check is positive under C and null under N, and the observed
+    control-subtracted metric becomes more negative from 20k to 120k. The
+    direct 120k causal endpoint did not clear and oracle convergence failed,
+    so this attempt establishes neither PFN ordering use nor an undertraining
+    effect.
+  </p>
+
+  <h2>Next decisive step</h2>
+  <p>
+    Run an outcome-blind oracle-precision pilot on the fixed 400-row nested
+    panel. Compare the frozen prior-proposal estimator with a proposal that
+    targets the causal posterior, and require all existing convergence gates
+    to pass before starting a fresh-seed confirmation. Merely doubling the
+    same proposal is not justified by ESS values near one.
+  </p>
+
+  <h2>Provenance</h2>
+  <p class="mono">
+    source commit: 9c6a3732993ea13557279ec8d330b7d1a076e63f<br>
+    source tag: phase1-ordering-confirmation-v1-fix2<br>
+    attempt identity: ec282fc468de2f42f01dc11c4b6733a5d926796a5929e96e549f52fcfa9c91b8<br>
+    joined raw SHA-256: d02b4093a398b7fda849794bd92a1d599162671ee0796fcfded50767a7d6bdff<br>
+    joined summary SHA-256: f0d5db5c2a5ad67817053d75edc142350697fb674fd624037464bf3d108d92bb
+  </p>
+</body>
+</html>
