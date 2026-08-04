@@ -238,10 +238,11 @@ def score_pilot(
             )
             for o in range(N_ORDERINGS)
         }
-        full = sum(mcmc_predictives[o] * np.exp(mcmc_logz[o] - max(mcmc_logz)) for o in range(N_ORDERINGS))
-        full /= np.sum(np.exp(mcmc_logz - max(mcmc_logz)))
+        mcmc_logz = np.asarray(mcmc_logz, dtype=np.float64)
+        full = sum(mcmc_predictives[o] * np.exp(mcmc_logz[o] - mcmc_logz.max()) for o in range(N_ORDERINGS))
+        full /= np.sum(np.exp(mcmc_logz - mcmc_logz.max()))
         ablated = sum(mcmc_predictives[o] for o in range(N_ORDERINGS)) / N_ORDERINGS
-        w_o = np.exp(mcmc_logz - max(mcmc_logz)); w_o /= w_o.sum()
+        w_o = np.exp(mcmc_logz - mcmc_logz.max()); w_o /= w_o.sum()
         for p in (full, ablated, w_o):
             if not (np.isfinite(p).all() and (p >= 0).all() and abs(p.sum() - 1.0) < 1e-6):
                 raise RuntimeError("mcmc predictive/order posterior is not a valid probability vector")
