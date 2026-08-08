@@ -162,8 +162,9 @@ def verify(joined_path: Path, config_path: Path) -> dict[str, Any]:
         if key in np.load(joined_path, allow_pickle=False).files:
             with np.load(joined_path, allow_pickle=False) as z:
                 arr = z[key]
-            bad = int(np.sum(~np.isfinite(arr) | (arr < 0)
-                             | (np.abs(arr.sum(axis=1) - 1.0) > 1e-8)))
+            # arr is (n_rows, 100): check each row's normalization
+            row_sums = np.abs(arr.sum(axis=1) - 1.0)
+            bad = int(np.sum(~np.isfinite(arr).any(axis=1) | (arr.min(axis=1) < 0) | (row_sums > 1e-8)))
             checks[key] = bad
     gates["predictive_normalization_bad"] = checks
     gates["normalization_ok"] = bool(
